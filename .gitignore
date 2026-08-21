@@ -1,0 +1,46 @@
+# 历史代码与本地资料
+/archive/
+/KEY-INVENTORY.md
+/iot-device-*.md
+
+# 环境变量与凭据
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*_rsa
+*.p12
+*.mobileprovision
+Secrets.xcconfig
+
+# macOS 与编辑器
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+**/xcuserdata/
+*.xcuserstate
+
+# Xcode 构建产物
+DerivedData/
+build/
+*.xcarchive
+*.ipa
+
+# Python 运行数据
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+var/
+runtime/
+*.sqlite
+*.sqlite3
+*.db
+*.log

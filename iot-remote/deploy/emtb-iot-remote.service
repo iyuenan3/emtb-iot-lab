@@ -1,0 +1,27 @@
+[Unit]
+Description=单车 IoT 远程调试服务
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/services/emtb-iot-remote
+EnvironmentFile=%h/services/emtb-iot-remote/.env
+ExecStart=/usr/bin/python3 -m iot_remote serve --db %h/services/emtb-iot-remote/var/iot.sqlite3 --target-imei ${TARGET_IMEI} --vehicle-name ${VEHICLE_NAME} --tcp-host ${TCP_HOST} --tcp-port ${TCP_PORT} --http-host ${HTTP_HOST} --http-port ${HTTP_PORT}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/services/emtb-iot-remote/var
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

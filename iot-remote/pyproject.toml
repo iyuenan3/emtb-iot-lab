@@ -1,0 +1,8 @@
+[project]
+name = "iot-remote"
+version = "0.1.0"
+description = "单车 IoT 远程调试服务"
+requires-python = ">=3.9"
+
+[tool.unittest]
+start-directory = "tests"
