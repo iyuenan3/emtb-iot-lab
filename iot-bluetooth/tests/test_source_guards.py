@@ -34,6 +34,9 @@ class SourceGuardTests(unittest.TestCase):
         for name in wrappers:
             self.assertRegex(MANAGER, rf"func {name}\(")
         self.assertIn(".deviceOwnerAuthentication", MANAGER)
+        self.assertIn("@Published private(set) var isAuthorizing = false", MANAGER)
+        self.assertIn("var isOperationBusy: Bool { isBusy || isAuthorizing }", MANAGER)
+        self.assertIn("guard !isAuthorizing, !isBusy else", MANAGER)
 
     def test_views_do_not_call_raw_sensitive_ble_writes(self):
         forbidden = (
@@ -44,14 +47,15 @@ class SourceGuardTests(unittest.TestCase):
         )
         for name in forbidden:
             self.assertIsNone(re.search(rf"device\.{name}\(", CONTENT))
+        self.assertNotIn("device.isBusy", CONTENT)
 
     def test_external_lock_has_no_sender(self):
         self.assertNotIn("operateExternalLock", MANAGER + CONTENT)
         self.assertNotIn("send(.externalEquipment", MANAGER)
         self.assertIn("因果未确认，危险诊断禁用", CONTENT)
 
-    def test_build_number_is_19(self):
-        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 19;"), 2)
+    def test_build_number_is_20(self):
+        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 20;"), 2)
 
 
 if __name__ == "__main__":

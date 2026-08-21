@@ -165,11 +165,11 @@ private struct VehicleHomeView: View {
         if device.isReady {
             HStack(spacing: 12) {
                 LongPressActionButton(title: "长按开锁", icon: "lock.open", color: .orange,
-                                      enabled: !device.isBusy && device.snapshot.isLocked != false) {
+                                      enabled: !device.isOperationBusy && device.snapshot.isLocked != false) {
                     Task { await device.unlockWithOwnerAuthentication() }
                 }
                 LongPressActionButton(title: "长按关锁", icon: "lock", color: .indigo,
-                                      enabled: !device.isBusy && device.snapshot.isLocked != true) {
+                                      enabled: !device.isOperationBusy && device.snapshot.isLocked != true) {
                     Task { await device.lockWithOwnerAuthentication() }
                 }
             }
@@ -418,7 +418,7 @@ private struct VehicleHomeView: View {
     }
 
     private var statusMessage: String { channel == .remote ? remote.message : device.operationMessage }
-    private var isBusy: Bool { channel == .remote ? remote.isBusy : device.isBusy }
+    private var isBusy: Bool { channel == .remote ? remote.isBusy : device.isOperationBusy }
 
     private func refreshSelectedChannel() async {
         if channel == .remote, remote.isPaired { await remote.refresh() }
@@ -988,11 +988,11 @@ private struct ControlsView: View {
                 Button("发送设置") {
                     Task { await device.applyWithOwnerAuthentication(setting) }
                 }
-                .disabled(!device.isReady || device.isBusy)
+                .disabled(!device.isReady || device.isOperationBusy)
             }
             Section("滑板车电源") {
-                Button("开机") { pendingPower = true }.disabled(!device.isReady || device.isBusy)
-                Button("关机", role: .destructive) { pendingPower = false }.disabled(!device.isReady || device.isBusy)
+                Button("开机") { pendingPower = true }.disabled(!device.isReady || device.isOperationBusy)
+                Button("关机", role: .destructive) { pendingPower = false }.disabled(!device.isReady || device.isOperationBusy)
             }
             Section("外部锁兼容性诊断") {
                 Label("因果未确认，危险诊断禁用", systemImage: "exclamationmark.triangle.fill")
@@ -1022,19 +1022,19 @@ private struct ControlsView: View {
                         )
                     }
                 }
-                .disabled(!device.isReady || device.isBusy)
+                .disabled(!device.isReady || device.isOperationBusy)
             }
             Section("RFID 与旧数据") {
                 Button("登记 RFID 卡") {
                     Task { await device.startRFIDRegistrationWithOwnerAuthentication() }
                 }
-                .disabled(!device.isReady || device.isBusy)
+                .disabled(!device.isReady || device.isOperationBusy)
                 Button("读取未上传骑行数据") { device.requestOldRideData() }.disabled(!device.isReady)
                 if !device.oldRideDataHex.isEmpty {
                     Text(device.oldRideDataHex).font(.caption.monospaced()).textSelection(.enabled)
                 }
                 Button("清除未上传骑行数据", role: .destructive) { showClearConfirmation = true }
-                    .disabled(!device.isReady || device.isBusy)
+                    .disabled(!device.isReady || device.isOperationBusy)
             }
             if !device.operationMessage.isEmpty {
                 Section("状态") { Text(device.operationMessage).foregroundStyle(.secondary) }

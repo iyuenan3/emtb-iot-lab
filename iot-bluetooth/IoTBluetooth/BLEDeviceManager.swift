@@ -11,6 +11,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     @Published private(set) var capabilityResults: [String: RemoteCapabilityLatestResult] = [:]
     @Published private(set) var isAuthenticated = false
     @Published private(set) var isBusy = false
+    @Published private(set) var isAuthorizing = false
     @Published private(set) var operationMessage = ""
     @Published private(set) var oldRideDataHex = ""
     @Published private(set) var deviceKeyStored = false
@@ -72,6 +73,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     }
 
     var isReady: Bool { phase == .ready && isAuthenticated }
+    var isOperationBusy: Bool { isBusy || isAuthorizing }
 
     func saveDeviceKeyWithOwnerAuthentication(_ key: String) async -> Bool {
         await performAuthorized("确认保存或更新车辆蓝牙密钥") {
@@ -838,6 +840,13 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     private func performAuthorized(
         _ reason: String, operation: () throws -> Void
     ) async -> Bool {
+        guard !isAuthorizing, !isBusy else {
+            operationMessage = "已有操作或身份验证正在进行，请稍后再试"
+            appendEvent("幂等", "已有操作或身份验证正在进行，忽略重复请求")
+            return false
+        }
+        isAuthorizing = true
+        defer { isAuthorizing = false }
         do {
             let context = LAContext()
             var evaluationError: NSError?
