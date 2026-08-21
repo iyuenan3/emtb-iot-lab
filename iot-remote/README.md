@@ -22,6 +22,7 @@
 - 统一审计配对、命令、定位、骑行、告警、BLE、设置、设备会话和每日清理，不保存认证材料或原始网络地址。
 - 持久化设备会话的随机盐地址摘要、收发与解析计数、最后 Q0/H0 和断开原因；服务重启会关闭遗留活动会话。
 - 设置 API 只允许 App 修改轨迹保留期，其余通信、定位、布防和离线移动阈值只读展示。
+- 每日清理完成后生成 SQLite 在线快照，以 CMS AES-256-CBC 加密并原子替换上一份恢复副本；服务器只持有恢复公钥证书，解密身份只保存在管理员 Mac 登录钥匙串。
 
 ## 本地运行
 
@@ -48,10 +49,24 @@ HTTP 默认只监听 `127.0.0.1:18081`，部署时应由反向代理提供 HTTPS
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 ```
 
+## 加密恢复副本
+
+`emtb-iot-backup.timer` 每天按 `Asia/Shanghai` 在 03:45 触发，晚于 03:30 的保留清理。任务使用 SQLite 在线备份，不复制正在变化的数据库文件；归档只包含 `iot.sqlite3` 和 `manifest.json`，随后使用部署机上的公钥证书加密。`recovery/` 权限为 `700`，`latest.cms`、`latest.json` 和锁文件权限为 `600`，不在服务器保存私钥或明文副本。
+
+人工恢复时，先把 `latest.cms` 下载到持有恢复身份的 Mac，在登录钥匙串中解密为临时归档，再运行结构、大小、SHA-256 和 SQLite 完整性校验：
+
+```bash
+security cms -D -i latest.cms -o payload.tar
+PYTHONPATH=iot-remote python3 -m iot_remote verify-backup \
+  --archive payload.tar --output-db restored.sqlite3
+```
+
+校验不会覆盖已有目标。只有维护窗口内停止服务、另行保存现场数据库并完成恢复后回归，才可用 `restored.sqlite3` 替换线上数据库。恢复后必须立即重新运行保留清理。密文采用 CMS AES-256-CBC，归档内摘要与 SQLite 完整性检查负责发现错误密钥、损坏或内容篡改；这不是服务器侧可自动解密的热备。
+
 ## 部署
 
 将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。定位质量阈值也由该文件集中配置，默认至少 4 颗卫星、HDOP 不高于 8、相邻可靠点估算速度不高于 25 米每秒。离线移动推断默认要求两次位置分别偏离停车基线至少 200 米，且两个样本相距不超过 75 米；这两个值是无户外样本时的保守初值，必须根据实车数据校准。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。切换时还要确认旧服务在 `TimeoutStopSec` 内以 `Result=success` 停止，不能把 systemd 强制杀死当成正常退出。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
 
-2026 年 8 月 22 日部署基线为 Git revision `7521515a144e80fa0395f93833e6adff44f1e833`。`emtb-iot-remote.service` 已在发布目录和线上目录分别通过远端 Python 3.12 的 69 项测试，并通过内部与公网 revision、未认证 API 401、主页 200、四个核心源码哈希、`device_sessions` 与 `audit_logs` 迁移、700/600/600 权限、200/75 阈值和单一活动摘要会话检查。切换前停止为 `Result=success`，设备随后自动恢复在线。部署前备份位于 `backups/20260822-0351-pre-7521515`，完整发布目录位于 `releases/7521515a144e80fa0395f93833e6adff44f1e833`。真实 BLE 事件队列、W0、D1、告警定位链、60 秒轨迹和离线移动阈值仍待实车验收。
+2026 年 8 月 22 日部署基线为 Git revision `7521515a144e80fa0395f93833e6adff44f1e833`。`emtb-iot-remote.service` 已在发布目录和线上目录分别通过远端 Python 3.12 的 69 项测试，并通过内部与公网 revision、未认证 API 401、主页 200、四个核心源码哈希、`device_sessions` 与 `audit_logs` 迁移、700/600/600 权限、200/75 阈值和单一活动摘要会话检查。切换前停止为 `Result=success`，设备随后自动恢复在线。部署前备份位于 `backups/20260822-0351-pre-7521515`，完整发布目录位于 `releases/7521515a144e80fa0395f93833e6adff44f1e833`。每日加密恢复副本代码和 systemd 定时器已完成，正在等待部署与真实密文恢复演练。真实 BLE 事件队列、W0、D1、告警定位链、60 秒轨迹和离线移动阈值仍待实车验收。
 
 不得提交真实 IMEI、配对码、令牌、控制私钥、数据库、日志或服务器现场记录。

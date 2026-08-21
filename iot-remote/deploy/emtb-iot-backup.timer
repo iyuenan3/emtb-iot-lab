@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily EMTB IoT encrypted recovery backup
+
+[Timer]
+OnCalendar=*-*-* 03:45:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+Unit=emtb-iot-backup.service
+
+[Install]
+WantedBy=timers.target

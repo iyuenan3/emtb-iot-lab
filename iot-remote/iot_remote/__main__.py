@@ -5,6 +5,12 @@ import asyncio
 import logging
 import os
 
+from .backup import (
+    create_encrypted_backup,
+    decrypt_and_verify_backup,
+    record_backup_audit,
+    verify_decrypted_archive,
+)
 from .database import Database
 from .service import RemoteService, run_servers
 
@@ -28,11 +34,51 @@ def parser() -> argparse.ArgumentParser:
     pairing = subcommands.add_parser("pairing-code", help="生成十分钟有效的一次性配对码")
     pairing.add_argument("--db", required=True)
     pairing.add_argument("--ttl", type=int, default=600)
+    backup = subcommands.add_parser("backup", help="创建 SQLite 加密恢复副本")
+    backup.add_argument("--db", required=True)
+    backup.add_argument("--recipient-cert", required=True)
+    backup.add_argument("--output-dir", required=True)
+    backup.add_argument("--openssl", default="/usr/bin/openssl")
+    decrypt = subcommands.add_parser("decrypt-backup", help="解密并校验恢复副本")
+    decrypt.add_argument("--input", required=True)
+    decrypt.add_argument("--recipient-cert", required=True)
+    decrypt.add_argument("--private-key", required=True)
+    decrypt.add_argument("--output-db", required=True)
+    decrypt.add_argument("--openssl", default="/usr/bin/openssl")
+    verify = subcommands.add_parser("verify-backup", help="校验已解密的恢复归档")
+    verify.add_argument("--archive", required=True)
+    verify.add_argument("--output-db", required=True)
     return root
 
 
 def main() -> None:
     arguments = parser().parse_args()
+    if arguments.command == "backup":
+        try:
+            result = create_encrypted_backup(
+                arguments.db, arguments.recipient_cert,
+                arguments.output_dir, arguments.openssl,
+            )
+            record_backup_audit(arguments.db, "succeeded", result)
+        except Exception:
+            record_backup_audit(arguments.db, "failed")
+            raise SystemExit("加密恢复副本创建失败")
+        print(f"backup_created_at={result['created_at']}")
+        print(f"cipher_sha256={result['cipher_sha256']}")
+        return
+    if arguments.command == "decrypt-backup":
+        result = decrypt_and_verify_backup(
+            arguments.input, arguments.recipient_cert, arguments.private_key,
+            arguments.output_db, arguments.openssl,
+        )
+        print(f"backup_created_at={result['created_at']}")
+        print("restore_verification=ok")
+        return
+    if arguments.command == "verify-backup":
+        result = verify_decrypted_archive(arguments.archive, arguments.output_db)
+        print(f"backup_created_at={result['created_at']}")
+        print("restore_verification=ok")
+        return
     database = Database(arguments.db)
     if arguments.command == "pairing-code":
         print(database.create_pairing_code(arguments.ttl))
