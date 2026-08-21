@@ -12,9 +12,9 @@
 | BLE 状态 | `BLEDeviceManager.swift` | 扫描、认证、读写、重连和本地日志 | 已实现，部分指令待实车验证 |
 | BLE 协议 | `OmniProtocol.swift` | 帧编码、解码、校验和命令定义 | 已实现 |
 | 云端状态 | `RemoteControlManager.swift` | 配对、签名、车辆与命令 API | 已实现首期能力 |
-| BLE 事件队列 | `PendingBLEEventStore.swift` | 持久化、幂等补报和成功后删除 | Build 15 已实现，待真机验收 |
+| BLE 事件队列 | `PendingBLEEventStore.swift` | 持久化、幂等补报和成功后删除 | Build 15 已安装，待真实 BLE 队列验收 |
 | 本机密钥 | `KeychainStore.swift` | BLE 密钥和远程凭据 | 已实现 |
-| 远程服务 | `../iot-remote/` | 单车 TCP、HTTPS API、命令状态机 | 2026 年 8 月 22 日已部署 revision `5d0ef70` |
+| 远程服务 | `../iot-remote/` | 单车 TCP、HTTPS API、命令状态机 | 2026 年 8 月 22 日已部署 revision `043004d` |
 | 位置存储 | `../iot-remote/iot_remote/database.py` | D0 原始报告、质量过滤、去重和历史查询 | 已部署，真实坐标与阈值待验收 |
 
 ## 数据流
