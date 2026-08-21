@@ -310,7 +310,7 @@ private struct VehicleMapView: View {
             VStack(spacing: 18) {
                 mapCard
                 if let latest = remote.latestLocation { locationDetails(latest) }
-                if remote.lastLocationReport?.valid == false { invalidLocationNotice }
+                if remote.lastLocationReport?.displayEligible == false { invalidLocationNotice }
 
                 Button("定位找车", systemImage: "location.fill") {
                     Task { await remote.send("location.once") }
@@ -385,11 +385,27 @@ private struct VehicleMapView: View {
     }
 
     private var invalidLocationNotice: some View {
-        Label("最近一次 D0 已返回，但 GPS 状态为无效。地图继续保留上一个有效位置。", systemImage: "location.slash.fill")
+        Label(locationRejectionText, systemImage: "location.slash.fill")
             .font(.callout).foregroundStyle(.orange)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
             .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var locationRejectionText: String {
+        guard let report = remote.lastLocationReport else { return "最近定位不可用于地图。" }
+        if !report.valid {
+            return "最近一次 D0 已返回，但 GPS 状态为无效。地图继续保留上一个可靠位置。"
+        }
+        let reason = [
+            "timestamp_missing": "设备时间缺失",
+            "timestamp_future": "设备时间超前",
+            "insufficient_satellites": "卫星数不足",
+            "poor_hdop": "定位精度不足",
+            "out_of_order": "定位点乱序",
+            "excessive_speed": "瞬时位移或速度异常",
+        ][report.rejectionReason ?? ""] ?? "定位质量检查未通过"
+        return "最近一次 D0 因\(reason)未进入地图，继续保留上一个可靠位置。"
     }
 
     private var latestCoordinate: CLLocationCoordinate2D? {

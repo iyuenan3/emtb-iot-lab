@@ -20,6 +20,9 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--tcp-port", type=int, default=19680)
     serve.add_argument("--http-host", default="127.0.0.1")
     serve.add_argument("--http-port", type=int, default=18081)
+    serve.add_argument("--location-min-satellites", type=int, default=4)
+    serve.add_argument("--location-max-hdop", type=float, default=8.0)
+    serve.add_argument("--location-max-speed-mps", type=float, default=25.0)
     pairing = subcommands.add_parser("pairing-code", help="生成十分钟有效的一次性配对码")
     pairing.add_argument("--db", required=True)
     pairing.add_argument("--ttl", type=int, default=600)
@@ -36,7 +39,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     revision = os.environ.get("EMTB_IOT_REVISION", "dev").strip() or "dev"
     service = RemoteService(
-        database, arguments.target_imei, arguments.vehicle_name, revision=revision
+        database, arguments.target_imei, arguments.vehicle_name, revision=revision,
+        location_min_satellites=arguments.location_min_satellites,
+        location_max_hdop=arguments.location_max_hdop,
+        location_max_speed_mps=arguments.location_max_speed_mps,
     )
     try:
         asyncio.run(run_servers(

@@ -66,9 +66,13 @@ struct RemoteCommand: Decodable, Identifiable {
 
 struct RemoteCommandResult: Decodable {
     let locationValid: Bool?
+    let locationDisplayEligible: Bool?
+    let locationRejectionReason: String?
 
     enum CodingKeys: String, CodingKey {
         case locationValid = "location_valid"
+        case locationDisplayEligible = "location_display_eligible"
+        case locationRejectionReason = "location_rejection_reason"
     }
 }
 
@@ -78,6 +82,8 @@ struct RemoteLocation: Decodable, Identifiable {
     let deviceTimestamp: Int?
     let receivedAt: Int
     let valid: Bool
+    let displayEligible: Bool?
+    let rejectionReason: String?
     let latitude: Double?
     let longitude: Double?
     let satellites: Int?
@@ -87,6 +93,8 @@ struct RemoteLocation: Decodable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case id, source, valid, latitude, longitude, satellites, hdop, mode
+        case displayEligible = "display_eligible"
+        case rejectionReason = "rejection_reason"
         case deviceTimestamp = "device_timestamp"
         case receivedAt = "received_at"
         case altitudeM = "altitude_m"
@@ -321,10 +329,12 @@ final class RemoteControlManager: ObservableObject {
         switch command.status {
         case "succeeded" where command.commandType == "telemetry.refresh":
             return "设备信息已更新，IoT 已返回最新数据"
-        case "succeeded" where command.commandType == "location.once" && command.result?.locationValid == true:
+        case "succeeded" where command.commandType == "location.once" && command.result?.locationDisplayEligible == true:
             return "车辆最新位置已更新"
         case "succeeded" where command.commandType == "location.once" && command.result?.locationValid == false:
             return "设备已返回，但本次 GPS 定位无效，地图保留上次有效位置"
+        case "succeeded" where command.commandType == "location.once" && command.result?.locationDisplayEligible == false:
+            return "设备已返回定位，但质量检查未通过，地图保留上次可靠位置"
         case "succeeded" where command.commandType == "location.once":
             return "单次定位已完成，请打开地图查看最新位置"
         case "succeeded" where command.commandType == "vehicle.lock":

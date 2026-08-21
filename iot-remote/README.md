@@ -12,6 +12,7 @@
 - 420 秒未收到有效设备报文时进入通信静默，720 秒时判定离线并禁用控制。
 - `/healthz` 返回部署版本、设备连接状态和最后有效报文年龄，部署后可独立读回版本。
 - `SIGINT` 与 `SIGTERM` 会先关闭监听和设备会话，把执行中命令标为结果未知，再干净退出。
+- 定位原始点完整留存，地图只使用通过设备时间、卫星数、HDOP、顺序和速度检查的点。
 
 ## 本地运行
 
@@ -22,7 +23,10 @@ python3 -m iot_remote serve \
   --db var/iot.sqlite3 \
   --target-imei '<目标 IMEI>' \
   --tcp-port 19680 \
-  --http-port 18081
+  --http-port 18081 \
+  --location-min-satellites 4 \
+  --location-max-hdop 8.0 \
+  --location-max-speed-mps 25.0
 ```
 
 HTTP 默认只监听 `127.0.0.1:18081`，部署时应由反向代理提供 HTTPS。不要直接把 HTTP 端口暴露到公网。TCP 端口供 IoT 设备连接，同一时刻只能有一个服务监听。
@@ -35,7 +39,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 
 ## 部署
 
-将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。切换时还要确认旧服务在 `TimeoutStopSec` 内以 `Result=success` 停止，不能把 systemd 强制杀死当成正常退出。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
+将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。定位质量阈值也由该文件集中配置，默认至少 4 颗卫星、HDOP 不高于 8、相邻可靠点估算速度不高于 25 米每秒。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。切换时还要确认旧服务在 `TimeoutStopSec` 内以 `Result=success` 停止，不能把 systemd 强制杀死当成正常退出。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
 
 2026 年 8 月 22 日部署基线为 Git revision `2f3be25`。新 `emtb-iot-remote.service` 已通过远端 30 项测试、内部 readiness、公网 revision、未认证 API 401、数据库权限 600 和一次真实 `Result=success` 停启验证。旧服务 unit 与源码保留作为回滚材料，但已停止并禁用。旧版本在首次切换时触发过停止超时，因此其 `failed/timeout` 不能作为新版本停机质量的反证；新版本的优雅停机已单独验证。
 

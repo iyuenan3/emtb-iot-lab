@@ -51,9 +51,15 @@ class DeviceSession:
 class RemoteService:
     def __init__(self, database: Database, target_imei: str, vehicle_name: str,
                  command_timeout: int = 30, silence_window: int = 420,
-                 offline_window: int = 720, revision: str = "dev"):
+                 offline_window: int = 720, revision: str = "dev",
+                 location_min_satellites: int = 4,
+                 location_max_hdop: float = 8.0,
+                 location_max_speed_mps: float = 25.0):
         if silence_window <= 0 or offline_window <= silence_window:
             raise ValueError("通信静默与离线阈值无效")
+        if (location_min_satellites < 0 or location_max_hdop <= 0
+                or location_max_speed_mps <= 0):
+            raise ValueError("定位质量阈值无效")
         self.database = database
         self.target_imei = target_imei
         self.vehicle_id = database.ensure_vehicle(target_imei, vehicle_name)
@@ -61,6 +67,9 @@ class RemoteService:
         self.silence_window = silence_window
         self.offline_window = offline_window
         self.revision = revision
+        self.location_min_satellites = location_min_satellites
+        self.location_max_hdop = location_max_hdop
+        self.location_max_speed_mps = location_max_speed_mps
         self.session: Optional[DeviceSession] = None
         self._session_lock = asyncio.Lock()
         self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
@@ -189,6 +198,9 @@ class RemoteService:
                     altitude_m=location_report.altitude_m,
                     mode=location_report.mode,
                     raw_fields=location_report.raw_fields,
+                    min_satellites=self.location_min_satellites,
+                    max_hdop=self.location_max_hdop,
+                    max_speed_mps=self.location_max_speed_mps,
                 )
 
         active = self.database.active_command(self.vehicle_id)
@@ -258,6 +270,8 @@ class RemoteService:
         elif command_type == "location.once" and stored_location is not None:
             detail["location_id"] = stored_location["id"]
             detail["location_valid"] = stored_location["valid"]
+            detail["location_display_eligible"] = stored_location["display_eligible"]
+            detail["location_rejection_reason"] = stored_location["rejection_reason"]
         self._finish(active["id"], "succeeded", None, detail)
 
     async def _send(self, function: str, fields: list[str]) -> None:

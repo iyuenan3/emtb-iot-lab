@@ -213,6 +213,33 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         )["valid"])
         self.assertEqual(self.database.latest_location(self.service.vehicle_id)["id"], latest["id"])
 
+    async def test_d0_quality_rejection_is_reported_without_moving_map(self):
+        first_fields = (
+            "1", "000000.00", "A", "3000.0000", "N", "12000.0000", "E",
+            "6", "0.80", "141123", "10", "M", "A",
+        )
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "D0", first_fields
+        ))
+        first = self.database.latest_location(self.service.vehicle_id)
+
+        command = self.create("location.once")
+        await self.service.dispatch_command(command["id"])
+        poor_fields = (
+            "0", "000100.00", "A", "3000.0060", "N", "12000.0060", "E",
+            "6", "12.0", "141123", "10", "M", "A",
+        )
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "D0", poor_fields
+        ))
+        result = self.database.command(command["id"])["result"]
+        self.assertTrue(result["location_valid"])
+        self.assertFalse(result["location_display_eligible"])
+        self.assertEqual(result["location_rejection_reason"], "poor_hdop")
+        self.assertEqual(
+            self.database.latest_location(self.service.vehicle_id)["id"], first["id"]
+        )
+
     async def test_location_command_and_authenticated_location_api(self):
         command = self.create("location.once")
         await self.service.dispatch_command(command["id"])

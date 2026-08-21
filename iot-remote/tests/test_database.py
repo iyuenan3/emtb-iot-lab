@@ -65,17 +65,40 @@ class DatabaseTests(unittest.TestCase):
             "'unknown', active_unlock_user TEXT, active_unlock_timestamp TEXT, "
             "updated_at INTEGER NOT NULL)"
         )
+        connection.execute(
+            "CREATE TABLE locations (id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id TEXT "
+            "NOT NULL, source TEXT NOT NULL, device_timestamp INTEGER, received_at INTEGER NOT "
+            "NULL, valid INTEGER NOT NULL, latitude REAL, longitude REAL, satellites INTEGER, "
+            "hdop REAL, altitude_m REAL, mode TEXT, raw_fields_json TEXT NOT NULL, fingerprint "
+            "TEXT NOT NULL, UNIQUE(vehicle_id,fingerprint))"
+        )
+        connection.execute(
+            "INSERT INTO locations(vehicle_id,source,device_timestamp,received_at,valid,latitude,"
+            "longitude,satellites,hdop,altitude_m,mode,raw_fields_json,fingerprint) "
+            "VALUES('vehicle-1','once',1700000000,1700000001,1,30.0,120.0,6,0.8,10.0,'A',"
+            "'[]','legacy')"
+        )
         connection.commit()
         connection.close()
         migrated = Database(legacy_path)
         columns = {
             row[1] for row in migrated.connection.execute("PRAGMA table_info(vehicle_state)")
         }
+        location_columns = {
+            row[1] for row in migrated.connection.execute("PRAGMA table_info(locations)")
+        }
+        legacy_location = migrated.connection.execute(
+            "SELECT display_eligible FROM locations WHERE fingerprint='legacy'"
+        ).fetchone()
         migrated.close()
         self.assertIn("telemetry_fields_json", columns)
         self.assertIn("telemetry_updated_at", columns)
         self.assertIn("lock_state_source", columns)
         self.assertIn("lock_state_updated_at", columns)
+        self.assertIn("rejection_reason", location_columns)
+        self.assertIn("distance_from_previous_m", location_columns)
+        self.assertIn("speed_mps", location_columns)
+        self.assertEqual(legacy_location[0], 1)
 
     def test_location_history_deduplicates_and_keeps_last_valid_point(self):
         values = {
@@ -99,6 +122,52 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(latest_valid["id"], first["id"])
         self.assertFalse(last_report["valid"])
         self.assertEqual(len(self.database.locations(self.vehicle_id)), 1)
+
+    def test_location_quality_rejects_poor_order_and_excessive_speed(self):
+        base = {
+            "source": "tracking", "valid": True, "satellites": 6,
+            "hdop": 0.8, "altitude_m": 10.0, "mode": "A",
+        }
+        first = self.database.save_location(
+            self.vehicle_id, device_timestamp=1700000000,
+            latitude=30.0, longitude=120.0,
+            raw_fields=("1", "first"), **base,
+        )
+        self.assertTrue(first["display_eligible"])
+
+        poor = self.database.save_location(
+            self.vehicle_id, device_timestamp=1700000060,
+            latitude=30.0001, longitude=120.0001, hdop=12.0,
+            raw_fields=("1", "poor"), **{key: value for key, value in base.items() if key != "hdop"},
+        )
+        self.assertFalse(poor["display_eligible"])
+        self.assertEqual(poor["rejection_reason"], "poor_hdop")
+
+        out_of_order = self.database.save_location(
+            self.vehicle_id, device_timestamp=1699999999,
+            latitude=30.0001, longitude=120.0001,
+            raw_fields=("1", "old"), **base,
+        )
+        self.assertEqual(out_of_order["rejection_reason"], "out_of_order")
+
+        jump = self.database.save_location(
+            self.vehicle_id, device_timestamp=1700000060,
+            latitude=31.0, longitude=121.0,
+            raw_fields=("1", "jump"), **base,
+        )
+        self.assertEqual(jump["rejection_reason"], "excessive_speed")
+        self.assertGreater(jump["speed_mps"], 25.0)
+
+        accepted = self.database.save_location(
+            self.vehicle_id, device_timestamp=1700000120,
+            latitude=30.0002, longitude=120.0002,
+            raw_fields=("1", "accepted"), **base,
+        )
+        self.assertTrue(accepted["display_eligible"])
+        self.assertEqual(
+            [point["id"] for point in self.database.locations(self.vehicle_id)],
+            [first["id"], accepted["id"]],
+        )
 
     def test_ble_lock_observation_is_idempotent_and_newer_state_wins(self):
         code = self.database.create_pairing_code()

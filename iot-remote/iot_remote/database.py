@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import math
 import os
 import secrets
 import sqlite3
@@ -55,7 +56,9 @@ CREATE TABLE IF NOT EXISTS locations (
   vehicle_id TEXT NOT NULL REFERENCES vehicles(id), source TEXT NOT NULL,
   device_timestamp INTEGER, received_at INTEGER NOT NULL, valid INTEGER NOT NULL,
   latitude REAL, longitude REAL, satellites INTEGER, hdop REAL, altitude_m REAL,
-  mode TEXT, raw_fields_json TEXT NOT NULL, fingerprint TEXT NOT NULL,
+  mode TEXT, display_eligible INTEGER NOT NULL DEFAULT 0, rejection_reason TEXT,
+  distance_from_previous_m REAL, speed_mps REAL,
+  raw_fields_json TEXT NOT NULL, fingerprint TEXT NOT NULL,
   UNIQUE(vehicle_id, fingerprint)
 );
 CREATE INDEX IF NOT EXISTS locations_vehicle_time
@@ -80,6 +83,7 @@ class Database:
         self.connection.execute("PRAGMA busy_timeout=5000")
         self.connection.executescript(SCHEMA)
         self._migrate_vehicle_state()
+        self._migrate_locations()
         self.connection.commit()
         os.chmod(self.path, 0o600)
 
@@ -97,6 +101,26 @@ class Database:
             )
         if "lock_state_updated_at" not in columns:
             self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN lock_state_updated_at INTEGER")
+
+    def _migrate_locations(self) -> None:
+        columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(locations)")
+        }
+        if "display_eligible" not in columns:
+            self.connection.execute(
+                "ALTER TABLE locations ADD COLUMN display_eligible INTEGER NOT NULL DEFAULT 0"
+            )
+            self.connection.execute(
+                "UPDATE locations SET display_eligible=valid WHERE valid=1"
+            )
+        if "rejection_reason" not in columns:
+            self.connection.execute("ALTER TABLE locations ADD COLUMN rejection_reason TEXT")
+        if "distance_from_previous_m" not in columns:
+            self.connection.execute(
+                "ALTER TABLE locations ADD COLUMN distance_from_previous_m REAL"
+            )
+        if "speed_mps" not in columns:
+            self.connection.execute("ALTER TABLE locations ADD COLUMN speed_mps REAL")
 
     def close(self) -> None:
         self.connection.close()
@@ -244,19 +268,42 @@ class Database:
                       latitude: Optional[float], longitude: Optional[float],
                       satellites: Optional[int], hdop: Optional[float],
                       altitude_m: Optional[float], mode: Optional[str],
-                      raw_fields: tuple[str, ...]) -> dict[str, Any]:
+                      raw_fields: tuple[str, ...], min_satellites: int = 4,
+                      max_hdop: float = 8.0,
+                      max_speed_mps: float = 25.0) -> dict[str, Any]:
         received_at = int(time.time())
         raw_json = json.dumps(list(raw_fields), separators=(",", ":"))
         fingerprint = hashlib.sha256(
             f"{source}\0{device_timestamp}\0{raw_json}".encode("utf-8")
         ).hexdigest()
+        existing = self.connection.execute(
+            "SELECT * FROM locations WHERE vehicle_id=? AND fingerprint=?",
+            (vehicle_id, fingerprint),
+        ).fetchone()
+        if existing:
+            return self._location_dict(existing)
+        eligible, reason, distance, speed = self._location_quality(
+            vehicle_id=vehicle_id,
+            device_timestamp=device_timestamp,
+            received_at=received_at,
+            valid=valid,
+            latitude=latitude,
+            longitude=longitude,
+            satellites=satellites,
+            hdop=hdop,
+            min_satellites=min_satellites,
+            max_hdop=max_hdop,
+            max_speed_mps=max_speed_mps,
+        )
         with self.connection:
             self.connection.execute(
                 "INSERT OR IGNORE INTO locations(vehicle_id,source,device_timestamp,received_at,"
-                "valid,latitude,longitude,satellites,hdop,altitude_m,mode,raw_fields_json,fingerprint) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "valid,latitude,longitude,satellites,hdop,altitude_m,mode,display_eligible,"
+                "rejection_reason,distance_from_previous_m,speed_mps,raw_fields_json,fingerprint) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (vehicle_id, source, device_timestamp, received_at, int(valid), latitude,
-                 longitude, satellites, hdop, altitude_m, mode, raw_json, fingerprint),
+                 longitude, satellites, hdop, altitude_m, mode, int(eligible), reason,
+                 distance, speed, raw_json, fingerprint),
             )
         row = self.connection.execute(
             "SELECT * FROM locations WHERE vehicle_id=? AND fingerprint=?",
@@ -264,8 +311,62 @@ class Database:
         ).fetchone()
         return self._location_dict(row)
 
+    def _location_quality(self, *, vehicle_id: str,
+                          device_timestamp: Optional[int], received_at: int,
+                          valid: bool, latitude: Optional[float],
+                          longitude: Optional[float], satellites: Optional[int],
+                          hdop: Optional[float], min_satellites: int,
+                          max_hdop: float,
+                          max_speed_mps: float) -> tuple[bool, Optional[str], Optional[float], Optional[float]]:
+        if not valid:
+            return False, "device_invalid", None, None
+        if latitude is None or longitude is None:
+            return False, "coordinate_missing", None, None
+        if device_timestamp is None:
+            return False, "timestamp_missing", None, None
+        if device_timestamp > received_at + 300:
+            return False, "timestamp_future", None, None
+        if satellites is None or satellites < min_satellites:
+            return False, "insufficient_satellites", None, None
+        if hdop is None or hdop > max_hdop:
+            return False, "poor_hdop", None, None
+
+        previous = self.connection.execute(
+            "SELECT device_timestamp,latitude,longitude FROM locations "
+            "WHERE vehicle_id=? AND display_eligible=1 AND device_timestamp IS NOT NULL "
+            "AND latitude IS NOT NULL AND longitude IS NOT NULL "
+            "ORDER BY device_timestamp DESC,id DESC LIMIT 1",
+            (vehicle_id,),
+        ).fetchone()
+        if previous is None:
+            return True, None, None, None
+        elapsed = device_timestamp - previous["device_timestamp"]
+        if elapsed <= 0:
+            return False, "out_of_order", None, None
+        distance = self._distance_m(
+            previous["latitude"], previous["longitude"], latitude, longitude
+        )
+        speed = distance / elapsed
+        if speed > max_speed_mps:
+            return False, "excessive_speed", distance, speed
+        return True, None, distance, speed
+
+    @staticmethod
+    def _distance_m(latitude_a: float, longitude_a: float,
+                    latitude_b: float, longitude_b: float) -> float:
+        radius_m = 6371008.8
+        lat_a = math.radians(latitude_a)
+        lat_b = math.radians(latitude_b)
+        delta_lat = lat_b - lat_a
+        delta_lon = math.radians(longitude_b - longitude_a)
+        value = (
+            math.sin(delta_lat / 2) ** 2
+            + math.cos(lat_a) * math.cos(lat_b) * math.sin(delta_lon / 2) ** 2
+        )
+        return 2 * radius_m * math.asin(min(1.0, math.sqrt(value)))
+
     def latest_location(self, vehicle_id: str, valid_only: bool = True) -> Optional[dict[str, Any]]:
-        condition = " AND valid=1" if valid_only else ""
+        condition = " AND valid=1 AND display_eligible=1" if valid_only else ""
         row = self.connection.execute(
             "SELECT * FROM locations WHERE vehicle_id=?" + condition +
             " ORDER BY COALESCE(device_timestamp,received_at) DESC,id DESC LIMIT 1",
@@ -279,6 +380,7 @@ class Database:
         parameters: list[Any] = [vehicle_id]
         if valid_only:
             clauses.append("valid=1")
+            clauses.append("display_eligible=1")
         if since is not None:
             clauses.append("COALESCE(device_timestamp,received_at)>=?")
             parameters.append(since)
@@ -400,6 +502,7 @@ class Database:
     def _location_dict(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["valid"] = bool(result["valid"])
+        result["display_eligible"] = bool(result["display_eligible"])
         result["raw_fields"] = json.loads(result.pop("raw_fields_json"))
         result.pop("fingerprint", None)
         return result
