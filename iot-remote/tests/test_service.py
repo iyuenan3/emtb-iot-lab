@@ -189,6 +189,34 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(self.database.vehicle(self.service.vehicle_id)["online"])
 
+    async def test_peer_disconnect_closes_session_and_marks_command_unknown(self):
+        self.service.session = None
+        self.database.update_vehicle_state(self.service.vehicle_id, online=0)
+        reader = asyncio.StreamReader()
+        writer = FakeWriter()
+        reader.feed_data(b"*SCOR,ZZ,000000000000001,Q0#\r\n")
+        task = asyncio.create_task(self.service.handle_device(reader, writer))
+        for _ in range(100):
+            if self.service.session is not None:
+                break
+            await asyncio.sleep(0.001)
+        self.assertIsNotNone(self.service.session)
+        session_id = self.service.session.session_id
+        command = self.create("vehicle.find_sound")
+        await self.service.dispatch_command(command["id"])
+
+        reader.feed_eof()
+        await asyncio.wait_for(task, timeout=1)
+
+        self.assertIsNone(self.service.session)
+        self.assertTrue(writer.closed)
+        self.assertEqual(
+            self.database.command(command["id"])["error_code"], "connection_lost"
+        )
+        session = self.database.device_session(session_id)
+        self.assertEqual(session["disconnect_reason"], "peer_closed")
+        self.assertIsNotNone(session["disconnected_at"])
+
     async def test_run_servers_closes_active_device_before_waiting_for_listener(self):
         tcp_server = FakeServer(self.writer)
         http_server = FakeServer()
@@ -337,6 +365,41 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         active = self.database.active_command(self.service.vehicle_id)
         self.assertEqual(active["command_type"], "tracking.set_policy")
         self.assertEqual(active["parameters"]["interval_seconds"], 300)
+
+    async def test_reconnect_check_aborts_when_h0_becomes_unlocked(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", 1
+        )
+        self.database.save_location(
+            self.service.vehicle_id, source="tracking", device_timestamp=1,
+            valid=True, latitude=22.6200, longitude=114.14369, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("baseline",),
+        )
+        self.database.mark_device_disconnected(self.service.vehicle_id, now=2)
+        reconnect_writer = FakeWriter()
+        self.service.session = DeviceSession(
+            reconnect_writer, "ZZ", asyncio.get_running_loop().time()
+        )
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("1", "412", "31", "99", "0")
+        ))
+        self.assertIsNotNone(self.service._reconnect_workflow)
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("0", "412", "31", "99", "0")
+        ))
+
+        self.assertIsNone(self.service._reconnect_workflow)
+        vehicle = self.database.vehicle(self.service.vehicle_id)
+        self.assertEqual(vehicle["lock_state"], "unlocked")
+        self.assertIsNone(vehicle["offline_since"])
+        self.assertIsNone(vehicle["parked_location_id"])
+        event_types = [
+            event["event_type"]
+            for event in self.database.alarm_events(self.service.vehicle_id)
+        ]
+        self.assertIn("offline_check_aborted_unlocked", event_types)
+        self.assertEqual(self.database.alarms(self.service.vehicle_id), [])
 
     async def test_reconnect_location_timeout_does_not_retry_same_session(self):
         self.database.apply_confirmed_lock_state(

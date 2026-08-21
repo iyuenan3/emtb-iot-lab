@@ -342,14 +342,15 @@ class RemoteService:
         finally:
             async with self._session_lock:
                 if self.session and self.session.writer is writer:
+                    session_id = self.session.session_id
                     self.session = None
                     self._policy_reconcile_pending = False
                     self._alarm_workflow = None
                     self._reconnect_workflow = None
                     self.database.mark_device_disconnected(self.vehicle_id)
-                    if self.session.session_id is not None:
+                    if session_id is not None:
                         self.database.close_device_session(
-                            self.session.session_id, disconnect_reason
+                            session_id, disconnect_reason
                         )
                     active = self.database.active_command(self.vehicle_id)
                     if active:
@@ -418,6 +419,8 @@ class RemoteService:
             self.database.reconcile_trip_for_lock_state(
                 self.vehicle_id, updates["lock_state"], state_time
             )
+            if updates["lock_state"] != "locked" and self._reconnect_workflow is not None:
+                self._abort_reconnect_workflow("offline_check_aborted_unlocked")
             if self.session and not self.session.policy_reconciled:
                 self.session.policy_reconciled = True
                 reconcile_new_session = True
@@ -711,6 +714,10 @@ class RemoteService:
         workflow = self._reconnect_workflow
         expected_stage = "awaiting_first" if sample_index == 1 else "awaiting_second"
         if workflow is None or workflow.get("stage") != expected_stage:
+            return
+        if self.database.vehicle(self.vehicle_id)["lock_state"] != "locked":
+            self._abort_reconnect_workflow("offline_check_aborted_unlocked")
+            await self._advance_deferred_workflows()
             return
         if location is None or not location["valid"] or not location["display_eligible"]:
             self._abort_reconnect_workflow(

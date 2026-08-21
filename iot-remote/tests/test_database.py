@@ -356,6 +356,43 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(vehicle["active_alarm_id"], alarm["id"])
         self.assertIsNone(vehicle["offline_since"])
 
+    def test_unlocked_vehicle_cannot_infer_offline_movement(self):
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "test", 100
+        )
+        baseline = self.database.save_location(
+            self.vehicle_id, source="tracking", device_timestamp=100,
+            valid=True, latitude=30.0, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("baseline",),
+        )
+        self.database.mark_device_disconnected(self.vehicle_id, now=150)
+        one = self.database.save_location(
+            self.vehicle_id, source="reconnect_check", device_timestamp=200,
+            valid=True, latitude=30.0030, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("one",),
+        )
+        two = self.database.save_location(
+            self.vehicle_id, source="reconnect_check", device_timestamp=300,
+            valid=True, latitude=30.0031, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("two",),
+        )
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "unlocked", "test", 350
+        )
+
+        result = self.database.finalize_offline_movement_check(
+            self.vehicle_id, offline_started_at=150,
+            baseline_location_id=baseline["id"],
+            reconnect_location_one_id=one["id"],
+            reconnect_location_two_id=two["id"],
+            movement_threshold_m=200.0, sample_max_separation_m=75.0,
+            now=400,
+        )
+
+        self.assertFalse(result["inferred"])
+        self.assertEqual(result["lock_state_at_evaluation"], "unlocked")
+        self.assertEqual(self.database.alarms(self.vehicle_id), [])
+
     def test_inconsistent_reconnect_locations_do_not_infer_movement(self):
         self.database.apply_confirmed_lock_state(
             self.vehicle_id, "locked", "test", 100

@@ -857,7 +857,7 @@ class Database:
             sample_one["latitude"], sample_one["longitude"],
             sample_two["latitude"], sample_two["longitude"],
         )
-        inferred = (
+        movement_consistent = (
             distance_one >= movement_threshold_m
             and distance_two >= movement_threshold_m
             and sample_distance <= sample_max_separation_m
@@ -875,9 +875,15 @@ class Database:
         alarm_id = None
         with self.connection:
             active = self.connection.execute(
-                "SELECT active_alarm_id FROM vehicle_state WHERE vehicle_id=?",
+                "SELECT active_alarm_id,lock_state FROM vehicle_state WHERE vehicle_id=?",
                 (vehicle_id,),
             ).fetchone()
+            inferred = bool(
+                movement_consistent and active and active["lock_state"] == "locked"
+            )
+            detail["lock_state_at_evaluation"] = (
+                active["lock_state"] if active is not None else "unknown"
+            )
             if inferred and active and active["active_alarm_id"] is None:
                 alarm_id = str(uuid.uuid4())
                 self.connection.execute(

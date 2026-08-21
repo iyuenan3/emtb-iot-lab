@@ -104,6 +104,8 @@ Build 11 已在当前 `vehicle_state` 表落地 `desired_tracking_interval`、`c
 
 Build 16 已落地 `device_sessions`。服务端只保存每次连接使用随机盐计算的 16 位 `peer_fingerprint`，不保存原始 IP 或端口；同时记录收发计数、解析错误、最后收发、最后 Q0、最后 H0 和断开原因。服务启动时会把崩溃遗留的活动会话关闭为 `service_restarted`。
 
+完成度审计补充了自然断线反例。连接处理必须先把当前 `session_id` 保存到局部变量，再清空内存会话；随后以 `peer_closed`、`receive_timeout` 或 `connection_error` 闭合持久化会话，并把在途命令标记为结果未知。禁止在会话置空后再次通过空对象读取 ID。
+
 ## 4. 命令与审计
 
 ### 4.1 `commands`
@@ -252,6 +254,8 @@ Build 13 已落地 `trips`、`vehicle_state.active_trip_id`、`locations.trip_id
 同类活动告警在 60 秒窗口内增加 `trigger_count`，不重复创建。活动异常移动告警通过部分唯一索引限制为一条。
 
 `suspected_offline_movement` 必须满足：断网前存在可信停车位置、重连时仍确认关锁、两次重连定位均有效且通过漂移过滤。定位阈值由户外验收配置，告警详情必须展示“推断”标签和用于比较的位置时间。
+
+关锁门禁在流程层和数据库层各执行一次。双定位期间收到任何 H0 开锁会清除待检查基线并终止流程；最终距离评估还会重新读取当前锁状态，即使位置满足阈值，评估时不是关锁也不得创建推断告警。
 
 Build 12 已落地 `alarms`、`alarm_events`、`vehicle_state.grace_until`、`vehicle_state.active_alarm_id` 和 `locations.alarm_id`。Build 14 增加 `vehicle_state.offline_since`、`parked_location_id` 和告警比较字段，持久化断连基线、两次重连定位、比较距离及当次阈值。等待期抑制、活动告警、用户确认、授权开锁解除和离线推断均在 SQLite 事务中处理。
 
