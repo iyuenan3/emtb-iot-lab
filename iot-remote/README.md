@@ -52,6 +52,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 
 将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。定位质量阈值也由该文件集中配置，默认至少 4 颗卫星、HDOP 不高于 8、相邻可靠点估算速度不高于 25 米每秒。离线移动推断默认要求两次位置分别偏离停车基线至少 200 米，且两个样本相距不超过 75 米；这两个值是无户外样本时的保守初值，必须根据实车数据校准。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。切换时还要确认旧服务在 `TimeoutStopSec` 内以 `Result=success` 停止，不能把 systemd 强制杀死当成正常退出。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
 
-2026 年 8 月 22 日部署基线为 Git revision `043004d43e96a526e24bdd7fe662537b1320a71c`。`emtb-iot-remote.service` 已在发布目录和线上目录分别通过远端 Python 3.12 的 65 项测试，并通过内部 readiness、公网 revision、未认证 API 401、主页 200、四个核心源码哈希、`ble_events` 数据库迁移、两个 unit 阈值及权限检查。Build 16 的能力目录、审计和设备会话源码已在本机通过 69 项测试，等待提交后部署。真实 BLE 事件队列、W0、D1、告警定位链、60 秒轨迹和离线移动阈值仍待实车验收。
+2026 年 8 月 22 日部署基线为 Git revision `7521515a144e80fa0395f93833e6adff44f1e833`。`emtb-iot-remote.service` 已在发布目录和线上目录分别通过远端 Python 3.12 的 69 项测试，并通过内部与公网 revision、未认证 API 401、主页 200、四个核心源码哈希、`device_sessions` 与 `audit_logs` 迁移、700/600/600 权限、200/75 阈值和单一活动摘要会话检查。切换前停止为 `Result=success`，设备随后自动恢复在线。部署前备份位于 `backups/20260822-0351-pre-7521515`，完整发布目录位于 `releases/7521515a144e80fa0395f93833e6adff44f1e833`。真实 BLE 事件队列、W0、D1、告警定位链、60 秒轨迹和离线移动阈值仍待实车验收。
 
 不得提交真实 IMEI、配对码、令牌、控制私钥、数据库、日志或服务器现场记录。
