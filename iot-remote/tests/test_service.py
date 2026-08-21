@@ -140,11 +140,33 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vehicle["power_mv"], 412)
         self.assertEqual(vehicle["battery_percent"], 99)
 
-    async def test_hourly_reporting_connection_remains_online(self):
-        self.service.session.last_frame_at = asyncio.get_running_loop().time() - 3600
-        self.assertTrue(self.service.is_online())
-        self.service.session.last_frame_at = asyncio.get_running_loop().time() - 4201
+    async def test_connectivity_transitions_disable_commands(self):
+        clock = asyncio.get_running_loop().time()
+        self.service.session.last_frame_at = clock - 419
+        self.assertEqual(self.service.connectivity_state(), "online")
+        self.assertTrue(self.service.capabilities()["vehicle.unlock"]["enabled"])
+
+        self.service.session.last_frame_at = clock - 421
+        self.assertEqual(self.service.connectivity_state(), "silent")
+        capability = self.service.capabilities()["vehicle.unlock"]
+        self.assertFalse(capability["enabled"])
+        self.assertEqual(capability["reason"], "device_silent")
+
+        self.service.session.last_frame_at = clock - 721
+        self.assertEqual(self.service.connectivity_state(), "offline")
         self.assertFalse(self.service.is_online())
+
+    async def test_health_exposes_revision_and_connectivity(self):
+        self.service.revision = "test-revision"
+        self.service.session.last_frame_at = asyncio.get_running_loop().time() - 421
+        payload, status = await self.service.route(HTTPSpec(
+            "GET", "/healthz", "", {}, b"",
+        ))
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["revision"], "test-revision")
+        self.assertEqual(payload["device_connectivity"], "silent")
+        self.assertFalse(payload["device_online"])
+        self.assertGreaterEqual(payload["last_frame_age_seconds"], 420)
 
     async def test_s6_preserves_verified_battery_and_raw_fields(self):
         fields = ("99", "11264", "12", "24066", "0", "65535", "53780", "0")

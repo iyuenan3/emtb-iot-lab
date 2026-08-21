@@ -49,12 +49,17 @@ class DeviceSession:
 
 class RemoteService:
     def __init__(self, database: Database, target_imei: str, vehicle_name: str,
-                 command_timeout: int = 30, online_window: int = 4200):
+                 command_timeout: int = 30, silence_window: int = 420,
+                 offline_window: int = 720, revision: str = "dev"):
+        if silence_window <= 0 or offline_window <= silence_window:
+            raise ValueError("通信静默与离线阈值无效")
         self.database = database
         self.target_imei = target_imei
         self.vehicle_id = database.ensure_vehicle(target_imei, vehicle_name)
         self.command_timeout = command_timeout
-        self.online_window = online_window
+        self.silence_window = silence_window
+        self.offline_window = offline_window
+        self.revision = revision
         self.session: Optional[DeviceSession] = None
         self._session_lock = asyncio.Lock()
         self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
@@ -62,11 +67,22 @@ class RemoteService:
         self.database.mark_inflight_unknown()
 
     def is_online(self) -> bool:
-        return (
-            self.session is not None
-            and not self.session.writer.is_closing()
-            and time.monotonic() - self.session.last_frame_at <= self.online_window
-        )
+        return self.connectivity_state() == "online"
+
+    def connectivity_state(self) -> str:
+        if self.session is None or self.session.writer.is_closing():
+            return "offline"
+        age = time.monotonic() - self.session.last_frame_at
+        if age <= self.silence_window:
+            return "online"
+        if age <= self.offline_window:
+            return "silent"
+        return "offline"
+
+    def last_frame_age_seconds(self) -> Optional[int]:
+        if self.session is None or self.session.writer.is_closing():
+            return None
+        return max(0, int(time.monotonic() - self.session.last_frame_at))
 
     async def handle_device(self, reader: asyncio.StreamReader,
                             writer: asyncio.StreamWriter) -> None:
@@ -75,7 +91,7 @@ class RemoteService:
         LOGGER.info("device connection opened")
         try:
             while True:
-                raw = await asyncio.wait_for(reader.read(1024), timeout=self.online_window)
+                raw = await asyncio.wait_for(reader.read(1024), timeout=self.offline_window)
                 if not raw:
                     break
                 buffer += raw
@@ -300,16 +316,20 @@ class RemoteService:
 
     def capabilities(self) -> dict[str, Any]:
         online = self.is_online()
+        disabled_reason = None if online else f"device_{self.connectivity_state()}"
         return {
-            "vehicle.unlock": {"enabled": online},
+            "vehicle.unlock": {"enabled": online, "reason": disabled_reason},
             "vehicle.lock": {
                 "enabled": online,
+                "reason": disabled_reason,
                 "requires_stationary_confirmation": True,
                 "physical_confirmation_required": True,
             },
-            "vehicle.find_sound": {"enabled": online, "cooldown_seconds": 10},
-            "telemetry.refresh": {"enabled": online},
-            "location.once": {"enabled": online},
+            "vehicle.find_sound": {
+                "enabled": online, "reason": disabled_reason, "cooldown_seconds": 10,
+            },
+            "telemetry.refresh": {"enabled": online, "reason": disabled_reason},
+            "location.once": {"enabled": online, "reason": disabled_reason},
             "wheel_lock": {"enabled": False, "reason": "unsupported_hardware"},
         }
 
@@ -362,13 +382,20 @@ class RemoteService:
 
     async def route(self, request: HTTPSpec) -> tuple[dict[str, Any], int]:
         if request.method == "GET" and request.path == "/healthz":
-            return {"ok": True, "device_online": self.is_online()}, 200
+            return {
+                "ok": True,
+                "revision": self.revision,
+                "device_online": self.is_online(),
+                "device_connectivity": self.connectivity_state(),
+                "last_frame_age_seconds": self.last_frame_age_seconds(),
+            }, 200
         if request.method == "POST" and request.path == "/api/v1/pairings/complete":
             return self._complete_pairing(request), 201
         client = self._authenticate_read(request)
         if request.method == "GET" and request.path == "/api/v1/vehicle":
             vehicle = self.database.vehicle(self.vehicle_id)
             vehicle["online"] = self.is_online()
+            vehicle["connection_state"] = self.connectivity_state()
             return {"vehicle": vehicle}, 200
         if request.method == "GET" and request.path == "/api/v1/capabilities":
             return {"capabilities": self.capabilities()}, 200

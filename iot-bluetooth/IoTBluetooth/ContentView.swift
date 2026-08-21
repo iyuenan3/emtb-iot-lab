@@ -256,7 +256,11 @@ private struct VehicleHomeView: View {
 
     private var networkText: String {
         guard remote.isPaired else { return "未配对" }
-        return remote.vehicle?.online == true ? "IoT 在线" : "IoT 离线"
+        switch remote.vehicle?.connectionState {
+        case "online": return "IoT 在线"
+        case "silent": return "通信静默"
+        default: return "IoT 离线"
+        }
     }
 
     private var channelStatusText: String {
@@ -267,7 +271,11 @@ private struct VehicleHomeView: View {
         if channel == .bluetooth {
             return device.isReady ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash"
         }
-        return remote.vehicle?.online == true ? "dot.radiowaves.left.and.right" : "wifi.slash"
+        switch remote.vehicle?.connectionState {
+        case "online": return "dot.radiowaves.left.and.right"
+        case "silent": return "exclamationmark.arrow.triangle.2.circlepath"
+        default: return "wifi.slash"
+        }
     }
 
     private var batteryText: String {

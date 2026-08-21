@@ -237,6 +237,8 @@ App 未运行不影响服务端告警处理。由于免费签名不保证 APNs�
 
 `H0` 目标值为 300 秒。超过 420 秒没有有效报文时进入 `silent`，超过 720 秒进入 `offline`。阈值只在实车长期测试发现明显误判时调整，并记录配置变更。
 
+当前实现的公开 `GET /healthz` 返回 `ok`、`revision`、`device_online`、`device_connectivity` 和 `last_frame_age_seconds`。`device_connectivity` 取值为 `online`、`silent` 或 `offline`；只有 `online` 允许下发控制。部署时通过 `EMTB_IOT_REVISION` 注入 Git SHA，并从公网入口读回相同值。`GET /api/v1/vehicle` 同步返回 `connection_state`，App 必须把 `silent` 明确显示为“通信静默”，不能合并成普通在线状态。
+
 ## 10. 配置与运维接口边界
 
 API 不提供数据库下载、服务器 Shell、任意 TCP 下发、任意 SQL 或密钥读取。设备密钥轮换、服务器地址、APN、OTA 和设备电源首版只在近场 BLE 维护页执行。云端能力目录可以展示，但远程执行保持禁用。未来若开放远程维护，必须重新确认需求，并增加独立 capability、参数白名单、二次确认和单项验收。

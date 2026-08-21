@@ -53,7 +53,7 @@ struct RemoteControlView: View {
     private var vehicleSection: some View {
         Section("车辆") {
             LabeledContent("设备", value: remote.vehicle?.displayName ?? "未读取")
-            LabeledContent("网络", value: remote.vehicle?.online == true ? "IoT 在线" : "IoT 离线")
+            LabeledContent("网络", value: connectivityText)
             LabeledContent("服务器锁状态", value: lockText)
             LabeledContent("状态来源", value: lockSourceText)
             if device.isReady, let isLocked = device.snapshot.isLocked {
@@ -66,6 +66,14 @@ struct RemoteControlView: View {
             LabeledContent("电量", value: remote.vehicle?.batteryPercent.map { "\($0)%" } ?? "未读取")
             LabeledContent("布防", value: remote.vehicle?.securityState ?? "未读取")
             LabeledContent("最后通信", value: lastSeenText)
+        }
+    }
+
+    private var connectivityText: String {
+        switch remote.vehicle?.connectionState {
+        case "online": return "IoT 在线"
+        case "silent": return "通信静默"
+        default: return "IoT 离线"
         }
     }
 

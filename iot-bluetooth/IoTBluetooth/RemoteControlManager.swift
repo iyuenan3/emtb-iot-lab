@@ -8,6 +8,7 @@ struct RemoteVehicle: Decodable {
     let id: String
     let displayName: String
     let online: Bool
+    let connectionState: String?
     let lastSeenAt: Int?
     let lockState: String
     let lockStateSource: String?
@@ -21,6 +22,7 @@ struct RemoteVehicle: Decodable {
     enum CodingKeys: String, CodingKey {
         case id, online
         case displayName = "display_name"
+        case connectionState = "connection_state"
         case lastSeenAt = "last_seen_at"
         case lockState = "lock_state"
         case lockStateSource = "lock_state_source"

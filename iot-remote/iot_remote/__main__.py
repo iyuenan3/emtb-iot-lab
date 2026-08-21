@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import os
 
 from .database import Database
 from .service import RemoteService, run_servers
@@ -33,7 +34,10 @@ def main() -> None:
         database.close()
         return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    service = RemoteService(database, arguments.target_imei, arguments.vehicle_name)
+    revision = os.environ.get("EMTB_IOT_REVISION", "dev").strip() or "dev"
+    service = RemoteService(
+        database, arguments.target_imei, arguments.vehicle_name, revision=revision
+    )
     try:
         asyncio.run(run_servers(
             service, arguments.tcp_host, arguments.tcp_port,
