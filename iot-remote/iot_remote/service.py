@@ -83,9 +83,9 @@ CAPABILITY_CATALOG: tuple[dict[str, Any], ...] = (
      "support_status": "协议明确未验证", "executable": False, "parameters_schema": "无",
      "persistence": "未接入"},
     {"id": "wheel_lock", "name": "外部车轮锁", "group": "外部锁", "protocol": "L5",
-     "channel": "IoT 云端", "purpose": "查询或控制外部车轮锁", "risk": "危险维护",
-     "support_status": "不适用", "executable": False, "parameters_schema": "禁用",
-     "persistence": "当前车辆无回包"},
+     "channel": "IoT 云端", "purpose": "与主锁关系因果未确认的兼容性诊断", "risk": "危险维护",
+     "support_status": "危险维护", "executable": False, "parameters_schema": "危险诊断禁用",
+     "persistence": "实测无回包，可能延迟执行"},
     {"id": "iot.s5", "name": "设备参数组", "group": "车辆设置", "protocol": "S5",
      "channel": "IoT 云端", "purpose": "读取或修改设备参数", "risk": "高",
      "support_status": "协议明确未验证", "executable": False, "parameters_schema": "近场维护",
@@ -1035,7 +1035,7 @@ class RemoteService:
                 "enabled": acknowledge_enabled,
                 "reason": None if acknowledge_enabled else "no_active_alarm",
             },
-            "wheel_lock": {"enabled": False, "reason": "unsupported_hardware"},
+            "wheel_lock": {"enabled": False, "reason": "causality_unconfirmed"},
         }
         catalog: dict[str, Any] = {}
         for definition in CAPABILITY_CATALOG:

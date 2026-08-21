@@ -869,7 +869,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(catalog["wheel_lock"]["enabled"])
         self.assertFalse(catalog["wheel_lock"]["executable"])
-        self.assertEqual(catalog["wheel_lock"]["support_status"], "不适用")
+        self.assertEqual(catalog["wheel_lock"]["support_status"], "危险维护")
+        self.assertEqual(catalog["wheel_lock"]["reason"], "causality_unconfirmed")
+        self.assertIn("因果未确认", catalog["wheel_lock"]["purpose"])
         self.assertFalse(catalog["iot.k0"]["enabled"])
         self.assertEqual(catalog["iot.k0"]["support_status"], "危险维护")
 

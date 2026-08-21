@@ -431,18 +431,25 @@ final class RemoteControlManager: ObservableObject {
         localBLE("ble.60", "骑行信息", "0x60", "状态与诊断", "协议明确未验证", "读取当前骑行信息", "低"),
         localBLE("ble.61", "基础设置", "0x61", "车辆设置", "协议明确未验证", "读取或修改基础设置", "高"),
         localBLE("ble.62", "扩展设置", "0x62", "车辆设置", "协议明确未验证", "读取或修改扩展设置", "高"),
-        localBLE("ble.81", "外部车轮锁", "0x81", "外部锁", "不适用", "查询或控制外部车轮锁", "危险维护")
+        localBLE(
+            "ble.81", "外部车轮锁", "0x81", "外部锁", "危险维护",
+            "与主锁关系因果未确认的兼容性诊断", "危险维护",
+            disabledReason: "实测无回包且可能延迟执行，危险诊断禁用"
+        )
     ]
 
     private static func localBLE(
         _ id: String, _ name: String, _ protocolName: String, _ group: String,
-        _ status: String, _ purpose: String, _ risk: String, executable: Bool = false
+        _ status: String, _ purpose: String, _ risk: String, executable: Bool = false,
+        disabledReason: String? = nil
     ) -> CapabilityDisplayItem {
         CapabilityDisplayItem(
             id: id, name: name, group: group, protocolName: protocolName,
             channel: "近场 BLE", purpose: purpose, risk: risk,
             supportStatus: status, enabled: false, executable: executable,
-            disabledReason: executable ? "请使用车辆首页的固定近场入口" : "目录只展示，不开放执行",
+            disabledReason: disabledReason ?? (
+                executable ? "请使用车辆首页的固定近场入口" : "目录只展示，不开放执行"
+            ),
             parametersSchema: "固定协议参数", persistence: "取决于设备命令",
             latestResult: nil
         )

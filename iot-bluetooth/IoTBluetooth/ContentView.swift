@@ -967,7 +967,6 @@ private struct ControlsView: View {
     @State private var setting = ScooterSetting.lightOn
     @State private var externalLock = ExternalLockOperation.queryBattery
     @State private var pendingPower: Bool?
-    @State private var showExternalConfirmation = false
     @State private var showClearConfirmation = false
     @State private var persistSettings = false
     @State private var cruise = 1
@@ -988,11 +987,18 @@ private struct ControlsView: View {
                 Button("开机") { pendingPower = true }.disabled(!device.isReady || device.isBusy)
                 Button("关机", role: .destructive) { pendingPower = false }.disabled(!device.isReady || device.isBusy)
             }
-            Section("外部锁") {
+            Section("外部锁兼容性诊断") {
+                Label("因果未确认，危险诊断禁用", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("L5 与 BLE 0x81 实测无回包，且曾出现无法归因的延迟关锁。在隔离变量验证完成前不允许发送任何外部锁命令。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 Picker("操作", selection: $externalLock) {
                     ForEach(ExternalLockOperation.allCases) { Text($0.rawValue).tag($0) }
                 }
-                Button("确认外设操作") { showExternalConfirmation = true }.disabled(!device.isReady || device.isBusy)
+                .disabled(true)
+                Button("外部锁命令已禁用") { }
+                    .disabled(true)
             }
             Section("高级滑板车参数") {
                 Toggle("写入后持久保存", isOn: $persistSettings)
@@ -1025,10 +1031,6 @@ private struct ControlsView: View {
                 pendingPower = nil
             }
         }
-        .alert("确认外部设备操作", isPresented: $showExternalConfirmation) {
-            Button("取消", role: .cancel) { }
-            Button("发送") { device.operateExternalLock(externalLock) }
-        } message: { Text(externalLock.rawValue) }
         .alert("清除旧骑行数据？", isPresented: $showClearConfirmation) {
             Button("取消", role: .cancel) { }
             Button("永久清除", role: .destructive) { device.clearOldRideData() }

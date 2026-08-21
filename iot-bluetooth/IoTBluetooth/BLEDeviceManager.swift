@@ -205,14 +205,6 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    func operateExternalLock(_ operation: ExternalLockOperation) {
-        guardReady {
-            beginBusy(operation.rawValue)
-            send(.externalEquipment, payload: [operation.code])
-            appendEvent("外设", "已发送：\(operation.rawValue)")
-        }
-    }
-
     func startRFIDRegistration() {
         guardReady {
             beginBusy("正在等待 RFID 卡", timeout: 30, timeoutMessage: "RFID 登记等待超时")
