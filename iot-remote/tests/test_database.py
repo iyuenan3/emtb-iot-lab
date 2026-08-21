@@ -278,6 +278,26 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(len(self.database.cleanup_events(self.vehicle_id)), 1)
 
+    def test_retention_preserves_events_for_active_alarm(self):
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "test", 100
+        )
+        self.database.arm_security(self.vehicle_id, now=100)
+        alarm = self.database.record_movement_event(
+            self.vehicle_id, now=100
+        )["alarm"]
+
+        result = self.database.run_retention_cleanup(
+            self.vehicle_id, now=40 * 86400
+        )
+
+        self.assertEqual(self.database.alarm(alarm["id"])["state"], "active")
+        events = self.database.alarm_events(self.vehicle_id)
+        self.assertTrue(any(event["alarm_id"] == alarm["id"] for event in events))
+        self.assertFalse(any(event["alarm_id"] is None for event in events))
+        self.assertEqual(result["deleted_alarms"], 0)
+        self.assertEqual(result["deleted_alarm_events"], 1)
+
     def test_unlocked_state_recovers_missing_active_trip_after_restart(self):
         self.database.update_vehicle_state(self.vehicle_id, lock_state="unlocked")
         recovered = self.database.recover_active_trip_if_needed(self.vehicle_id, now=500)

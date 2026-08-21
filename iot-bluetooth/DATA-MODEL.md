@@ -78,7 +78,7 @@
 | `last_h0_at` | INTEGER NULL | 最近心跳 |
 | `updated_at` | INTEGER | 快照更新时间 |
 
-只有设备明确回包才能更新 `lock_state` 和 `confirmed_tracking_interval`。发出命令只更新期望值，不提前修改确认值。
+只有设备明确回包才能更新 `lock_state` 和 `confirmed_tracking_interval`。发出命令只更新期望值，不提前修改确认值。逻辑 L1 或 H0 关锁只能更新锁状态，车辆仍为撤防时保持原定位频率；现场确认仪表、动力和轮毂锁三个物理结果并进入 `grace_period` 后，才能把 D1 期望值切换为 3600 秒。
 
 Build 11 已在当前 `vehicle_state` 表落地 `desired_tracking_interval`、`confirmed_tracking_interval` 和 `tracking_confirmed_at`。旧数据库启动时原位补列，不伪造历史确认值。
 
@@ -301,7 +301,7 @@ TCP 写入发生在事务提交之后。发送前服务端再次确认命令仍�
 
 - 完成的骑行及其位置按 `location_history_days` 保留。以骑行结束时间计算，避免只留下半条轨迹。
 - 不属于骑行的普通定位按接收时间保留 7 或 30 天。
-- 活动骑行、活动告警、当前车辆快照不参与清理。
+- 活动骑行、活动告警及其完整事件链、当前车辆快照不参与清理。
 - 已结束告警、命令、命令事件和审计记录首版保留 30 天。
 - BLE 事件保留 30 天，超过 24 小时只影响其业务生效资格，不影响审计保留期。
 - 会话明细保留 7 天，只在车辆快照保留最后通信摘要。

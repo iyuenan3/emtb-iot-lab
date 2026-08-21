@@ -1136,8 +1136,10 @@ class Database:
                     ended_alarm_ids,
                 ).rowcount
             deleted_alarm_events = self.connection.execute(
-                "DELETE FROM alarm_events WHERE vehicle_id=? AND created_at<?",
-                (vehicle_id, thirty_day_cutoff),
+                "DELETE FROM alarm_events WHERE vehicle_id=? AND created_at<? "
+                "AND (alarm_id IS NULL OR alarm_id NOT IN "
+                "(SELECT id FROM alarms WHERE vehicle_id=? AND state='active'))",
+                (vehicle_id, thirty_day_cutoff, vehicle_id),
             ).rowcount
             deleted_sessions = self.connection.execute(
                 "DELETE FROM device_sessions WHERE vehicle_id=? AND disconnected_at IS NOT NULL "

@@ -809,7 +809,8 @@ class RemoteService:
             return TRACKING_POLICIES["alarm"]
         if vehicle["lock_state"] == "unlocked":
             return TRACKING_POLICIES["unlocked"]
-        if vehicle["lock_state"] == "locked":
+        if (vehicle["lock_state"] == "locked"
+                and vehicle["security_state"] in {"grace_period", "armed"}):
             return TRACKING_POLICIES["locked"]
         return None
 

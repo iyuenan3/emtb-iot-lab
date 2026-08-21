@@ -128,6 +128,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.database.apply_confirmed_lock_state(
             self.service.vehicle_id, "unlocked", "test", int(time.time()) - 10
         )
+        self.database.update_vehicle_state(
+            self.service.vehicle_id,
+            desired_tracking_interval=60,
+            confirmed_tracking_interval=60,
+        )
         trip_id = self.database.vehicle(self.service.vehicle_id)["active_trip_id"]
         command = self.create("vehicle.lock", parameters={"stationary_confirmed": True})
         await self.service.dispatch_command(command["id"])
@@ -150,8 +155,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vehicle["security_state"], "disarmed")
         self.assertIsNone(vehicle["active_trip_id"])
         self.assertEqual(self.database.trip(trip_id)["end_command_id"], command["id"])
-        self.assertEqual(vehicle["desired_tracking_interval"], 3600)
-        self.assertIn(b",D1,3600#", self.writer.data)
+        self.assertEqual(vehicle["desired_tracking_interval"], 60)
+        self.assertEqual(vehicle["confirmed_tracking_interval"], 60)
+        self.assertNotIn(b",D1,3600#", self.writer.data)
 
     async def test_already_locked_is_noop_without_sending(self):
         self.database.update_vehicle_state(self.service.vehicle_id, lock_state="locked")
@@ -293,8 +299,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vehicle["lock_state_source"], "iot_h0")
         self.assertEqual(vehicle["power_mv"], 412)
         self.assertEqual(vehicle["battery_percent"], 99)
-        self.assertEqual(vehicle["desired_tracking_interval"], 3600)
-        self.assertIn(b",D1,3600#", self.writer.data)
+        self.assertIsNone(vehicle["desired_tracking_interval"])
+        self.assertNotIn(b",D1,3600#", self.writer.data)
 
     async def test_h0_reconciles_recovered_trip_lifecycle(self):
         await self.service.process_frame(Frame(
@@ -528,7 +534,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(confirmed["tracking_confirmed_at"])
 
     async def test_d1_timeout_is_not_retried_on_same_session(self):
-        self.database.update_vehicle_state(self.service.vehicle_id, lock_state="locked")
+        self.database.update_vehicle_state(
+            self.service.vehicle_id, lock_state="locked", security_state="armed"
+        )
         self.service.session.policy_reconciled = True
         first = await self.service.reconcile_tracking_policy("test_timeout")
         self.assertIsNotNone(first)
@@ -547,7 +555,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_new_session_h0_creates_new_policy_command_after_timeout(self):
-        self.database.update_vehicle_state(self.service.vehicle_id, lock_state="locked")
+        self.database.update_vehicle_state(
+            self.service.vehicle_id, lock_state="locked", security_state="armed"
+        )
         first = await self.service.reconcile_tracking_policy("first_session")
         self.service._finish(first["id"], "unknown", "device_timeout")
         first_id = first["id"]
@@ -564,6 +574,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(active["id"], first_id)
 
     async def test_new_session_policy_waits_for_active_command(self):
+        self.database.update_vehicle_state(
+            self.service.vehicle_id, security_state="armed"
+        )
         find_sound = self.create("vehicle.find_sound")
         await self.service.dispatch_command(find_sound["id"])
         await self.service.process_frame(Frame(
@@ -584,6 +597,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.database.apply_confirmed_lock_state(
             self.service.vehicle_id, "locked", "test", int(time.time())
         )
+        self.database.update_vehicle_state(
+            self.service.vehicle_id,
+            desired_tracking_interval=60,
+            confirmed_tracking_interval=60,
+        )
         command = self.create(
             "security.confirm_locked",
             parameters={"physical_lock_confirmed": True},
@@ -594,6 +612,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(vehicle["security_state"], "grace_period")
         self.assertGreater(vehicle["grace_until"], int(time.time()))
+        self.assertEqual(vehicle["desired_tracking_interval"], 3600)
+        self.assertEqual(vehicle["confirmed_tracking_interval"], 60)
+        self.assertIn(b",D1,3600#", self.writer.data)
         self.assertIsNotNone(self.service._grace_task)
 
     async def test_manual_arm_requires_unlocked_warning_confirmation(self):
