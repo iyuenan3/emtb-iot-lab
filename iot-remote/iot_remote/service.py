@@ -710,10 +710,10 @@ async def run_servers(service: RemoteService, tcp_host: str, tcp_port: int,
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await service.shutdown()
         await asyncio.gather(
             tcp_server.wait_closed(), http_server.wait_closed(), return_exceptions=True
         )
-        await service.shutdown()
         for signum in installed_signals:
             loop.remove_signal_handler(signum)
         LOGGER.info("IoT remote service stopped cleanly")

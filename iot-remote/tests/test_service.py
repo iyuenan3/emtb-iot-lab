@@ -6,11 +6,12 @@ import os
 import tempfile
 import time
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from iot_remote.crypto import GX, GY, N, _scalar_multiply, canonical_request, sha256_hex
 from iot_remote.database import Database
 from iot_remote.protocol import Frame
-from iot_remote.service import APIError, DeviceSession, HTTPSpec, RemoteService
+from iot_remote.service import APIError, DeviceSession, HTTPSpec, RemoteService, run_servers
 
 
 class FakeWriter:
@@ -32,6 +33,28 @@ class FakeWriter:
 
     async def wait_closed(self):
         pass
+
+
+class FakeServer:
+    def __init__(self, writer=None):
+        self.writer = writer
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def serve_forever(self):
+        await asyncio.Future()
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        while self.writer is not None and not self.writer.closed:
+            await asyncio.sleep(0.001)
 
 
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -151,6 +174,23 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.database.command(command["id"])["error_code"], "service_stopped"
         )
         self.assertFalse(self.database.vehicle(self.service.vehicle_id)["online"])
+
+    async def test_run_servers_closes_active_device_before_waiting_for_listener(self):
+        tcp_server = FakeServer(self.writer)
+        http_server = FakeServer()
+        stop_event = asyncio.Event()
+        stop_event.set()
+        with patch(
+            "iot_remote.service.asyncio.start_server",
+            new=AsyncMock(side_effect=[tcp_server, http_server]),
+        ):
+            await asyncio.wait_for(
+                run_servers(self.service, "127.0.0.1", 0, "127.0.0.1", 0, stop_event),
+                timeout=0.2,
+            )
+        self.assertTrue(self.writer.closed)
+        self.assertTrue(tcp_server.closed)
+        self.assertTrue(http_server.closed)
 
     async def test_h0_updates_verified_vehicle_fields(self):
         await self.service.process_frame(Frame(
