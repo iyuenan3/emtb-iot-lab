@@ -695,22 +695,20 @@ async def run_servers(service: RemoteService, tcp_host: str, tcp_port: int,
         raise
     LOGGER.info("IoT TCP listening on %s:%s", tcp_host, tcp_port)
     LOGGER.info("HTTP API listening on %s:%s", http_host, http_port)
-    tasks: list[asyncio.Task[None]] = []
+    tasks = [
+        asyncio.create_task(tcp_server.serve_forever()),
+        asyncio.create_task(http_server.serve_forever()),
+    ]
     try:
-        async with tcp_server, http_server:
-            tasks = [
-                asyncio.create_task(tcp_server.serve_forever()),
-                asyncio.create_task(http_server.serve_forever()),
-            ]
-            await event.wait()
+        await event.wait()
     finally:
         tcp_server.close()
         http_server.close()
         for task in tasks:
             task.cancel()
+        await service.shutdown()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        await service.shutdown()
         await asyncio.gather(
             tcp_server.wait_closed(), http_server.wait_closed(), return_exceptions=True
         )

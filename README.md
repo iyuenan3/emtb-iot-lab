@@ -70,7 +70,7 @@ cd ../iot-tcp-lab
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 ```
 
-当前基线包含 37 项远程服务测试和 16 项 TCP 工具测试。iOS App 已通过无签名真机目标编译。代码存在不等于所有硬件能力均已实车验收，具体状态见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
+当前基线包含 38 项远程服务测试和 16 项 TCP 工具测试。iOS App 已通过无签名真机目标编译。代码存在不等于所有硬件能力均已实车验收，具体状态见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
 
 ## 安全与隐私
 

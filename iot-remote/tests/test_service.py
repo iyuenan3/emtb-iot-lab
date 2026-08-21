@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import tempfile
 import time
 import unittest
@@ -191,6 +192,56 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.writer.closed)
         self.assertTrue(tcp_server.closed)
         self.assertTrue(http_server.closed)
+
+    async def test_run_servers_stops_with_real_active_tcp_client(self):
+        self.service.session = None
+        self.database.update_vehicle_state(self.service.vehicle_id, online=0)
+        tcp_port = self._unused_port()
+        http_port = self._unused_port()
+        while http_port == tcp_port:
+            http_port = self._unused_port()
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(run_servers(
+            self.service, "127.0.0.1", tcp_port, "127.0.0.1", http_port, stop_event
+        ))
+        reader = None
+        writer = None
+        try:
+            for _ in range(100):
+                try:
+                    reader, writer = await asyncio.open_connection("127.0.0.1", tcp_port)
+                    break
+                except ConnectionRefusedError:
+                    await asyncio.sleep(0.01)
+            self.assertIsNotNone(reader)
+            self.assertIsNotNone(writer)
+            writer.write(
+                b"*SCOR,ZZ,000000000000001,H0,1,412,31,99,0#\r\n"
+            )
+            await writer.drain()
+            for _ in range(100):
+                if self.service.session is not None:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertIsNotNone(self.service.session)
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=3)
+            self.assertIsNone(self.service.session)
+            await asyncio.wait_for(reader.read(), timeout=1)
+            self.assertTrue(reader.at_eof())
+        finally:
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    @staticmethod
+    def _unused_port():
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            return listener.getsockname()[1]
 
     async def test_h0_updates_verified_vehicle_fields(self):
         await self.service.process_frame(Frame(
