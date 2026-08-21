@@ -98,10 +98,79 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("desired_tracking_interval", columns)
         self.assertIn("confirmed_tracking_interval", columns)
         self.assertIn("tracking_confirmed_at", columns)
+        self.assertIn("grace_until", columns)
+        self.assertIn("active_alarm_id", columns)
         self.assertIn("rejection_reason", location_columns)
         self.assertIn("distance_from_previous_m", location_columns)
         self.assertIn("speed_mps", location_columns)
+        self.assertIn("alarm_id", location_columns)
         self.assertEqual(legacy_location[0], 1)
+
+    def test_grace_suppresses_movement_then_arms_and_merges_alarm(self):
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "test", 100
+        )
+        grace = self.database.start_lock_grace(
+            self.vehicle_id, grace_seconds=300, now=100
+        )
+        self.assertEqual(grace["security_state"], "grace_period")
+        self.assertEqual(grace["grace_until"], 400)
+
+        suppressed = self.database.record_movement_event(self.vehicle_id, now=200)
+        self.assertTrue(suppressed["suppressed"])
+        self.assertEqual(self.database.alarms(self.vehicle_id), [])
+
+        first = self.database.record_movement_event(self.vehicle_id, now=400)
+        repeated = self.database.record_movement_event(self.vehicle_id, now=450)
+        notified_again = self.database.record_movement_event(self.vehicle_id, now=511)
+        self.assertFalse(first["suppressed"])
+        self.assertTrue(first["should_notify"])
+        self.assertFalse(repeated["should_notify"])
+        self.assertTrue(notified_again["should_notify"])
+        self.assertEqual(first["alarm"]["id"], repeated["alarm"]["id"])
+        self.assertEqual(notified_again["alarm"]["trigger_count"], 3)
+        self.assertEqual(
+            self.database.vehicle(self.vehicle_id)["security_state"], "alarm_active"
+        )
+
+    def test_alarm_acknowledge_and_unlock_clear_are_distinct(self):
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "test", 100
+        )
+        self.database.arm_security(self.vehicle_id, now=101)
+        active = self.database.record_movement_event(self.vehicle_id, now=102)["alarm"]
+        acknowledged = self.database.acknowledge_alarm(
+            self.vehicle_id, "client", now=103
+        )
+        self.assertEqual(acknowledged["state"], "acknowledged")
+        self.assertEqual(self.database.vehicle(self.vehicle_id)["security_state"], "armed")
+
+        second = self.database.record_movement_event(self.vehicle_id, now=200)["alarm"]
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "unlocked", "test", 201, "1", "201"
+        )
+        self.assertEqual(self.database.alarm(second["id"])["state"], "cleared")
+        self.assertEqual(self.database.alarm(active["id"])["state"], "acknowledged")
+        event_types = [
+            event["event_type"] for event in self.database.alarm_events(self.vehicle_id)
+        ]
+        self.assertIn("cleared_by_unlock", event_types)
+
+    def test_confirmed_lock_does_not_disarm_an_active_alarm(self):
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "test", 100
+        )
+        self.database.arm_security(self.vehicle_id, now=101)
+        alarm = self.database.record_movement_event(self.vehicle_id, now=102)["alarm"]
+
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "remote_command", 103
+        )
+
+        vehicle = self.database.vehicle(self.vehicle_id)
+        self.assertEqual(vehicle["security_state"], "alarm_active")
+        self.assertEqual(vehicle["active_alarm_id"], alarm["id"])
+        self.assertEqual(self.database.alarm(alarm["id"])["state"], "active")
 
     def test_location_history_deduplicates_and_keeps_last_valid_point(self):
         values = {

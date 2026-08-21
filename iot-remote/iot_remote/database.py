@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS vehicle_state (
   telemetry_updated_at INTEGER, lock_state_source TEXT NOT NULL DEFAULT 'unknown',
   lock_state_updated_at INTEGER, desired_tracking_interval INTEGER,
   confirmed_tracking_interval INTEGER, tracking_confirmed_at INTEGER,
+  grace_until INTEGER, active_alarm_id TEXT,
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pairing_codes (
@@ -59,7 +60,7 @@ CREATE TABLE IF NOT EXISTS locations (
   device_timestamp INTEGER, received_at INTEGER NOT NULL, valid INTEGER NOT NULL,
   latitude REAL, longitude REAL, satellites INTEGER, hdop REAL, altitude_m REAL,
   mode TEXT, display_eligible INTEGER NOT NULL DEFAULT 0, rejection_reason TEXT,
-  distance_from_previous_m REAL, speed_mps REAL,
+  distance_from_previous_m REAL, speed_mps REAL, alarm_id TEXT,
   raw_fields_json TEXT NOT NULL, fingerprint TEXT NOT NULL,
   UNIQUE(vehicle_id, fingerprint)
 );
@@ -70,6 +71,23 @@ CREATE TABLE IF NOT EXISTS ble_observations (
   client_id TEXT NOT NULL REFERENCES clients(id), lock_state TEXT NOT NULL,
   observed_at INTEGER NOT NULL, received_at INTEGER NOT NULL, applied INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS alarms (
+  id TEXT PRIMARY KEY, vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  alarm_type TEXT NOT NULL, state TEXT NOT NULL,
+  inferred INTEGER NOT NULL DEFAULT 0, first_triggered_at INTEGER NOT NULL,
+  last_triggered_at INTEGER NOT NULL, trigger_count INTEGER NOT NULL DEFAULT 1,
+  acknowledged_at INTEGER, cleared_at INTEGER, acknowledged_by TEXT,
+  note TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS alarms_active_type
+  ON alarms(vehicle_id, alarm_type) WHERE state='active';
+CREATE TABLE IF NOT EXISTS alarm_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  alarm_id TEXT REFERENCES alarms(id), event_type TEXT NOT NULL,
+  detail_json TEXT NOT NULL, created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alarm_events_vehicle_time
+  ON alarm_events(vehicle_id, created_at DESC);
 """
 
 
@@ -115,6 +133,10 @@ class Database:
             self.connection.execute(
                 "ALTER TABLE vehicle_state ADD COLUMN tracking_confirmed_at INTEGER"
             )
+        if "grace_until" not in columns:
+            self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN grace_until INTEGER")
+        if "active_alarm_id" not in columns:
+            self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN active_alarm_id TEXT")
 
     def _migrate_locations(self) -> None:
         columns = {
@@ -135,6 +157,8 @@ class Database:
             )
         if "speed_mps" not in columns:
             self.connection.execute("ALTER TABLE locations ADD COLUMN speed_mps REAL")
+        if "alarm_id" not in columns:
+            self.connection.execute("ALTER TABLE locations ADD COLUMN alarm_id TEXT")
 
     def close(self) -> None:
         self.connection.close()
@@ -216,6 +240,7 @@ class Database:
             "telemetry_fields_json", "telemetry_updated_at", "lock_state_source",
             "lock_state_updated_at", "desired_tracking_interval",
             "confirmed_tracking_interval", "tracking_confirmed_at",
+            "grace_until", "active_alarm_id",
         }
         filtered = {key: value for key, value in values.items() if key in allowed}
         if not filtered:
@@ -227,6 +252,220 @@ class Database:
             (*filtered.values(), vehicle_id),
         )
         self.connection.commit()
+
+    def apply_confirmed_lock_state(self, vehicle_id: str, lock_state: str,
+                                   source: str, updated_at: int,
+                                   unlock_user: Optional[str] = None,
+                                   unlock_timestamp: Optional[str] = None) -> None:
+        if lock_state not in {"locked", "unlocked"}:
+            raise ValueError("锁状态无效")
+        with self.connection:
+            if lock_state == "unlocked":
+                active_alarms = self.connection.execute(
+                    "SELECT id FROM alarms WHERE vehicle_id=? AND state='active'",
+                    (vehicle_id,),
+                ).fetchall()
+                self.connection.execute(
+                    "UPDATE alarms SET state='cleared',cleared_at=? "
+                    "WHERE vehicle_id=? AND state='active'",
+                    (updated_at, vehicle_id),
+                )
+                self.connection.execute(
+                    "UPDATE vehicle_state SET lock_state='unlocked',security_state='disarmed',"
+                    "grace_until=NULL,active_alarm_id=NULL,active_unlock_user=?,"
+                    "active_unlock_timestamp=?,lock_state_source=?,lock_state_updated_at=?,"
+                    "updated_at=? WHERE vehicle_id=?",
+                    (unlock_user, unlock_timestamp, source, updated_at, updated_at, vehicle_id),
+                )
+                for alarm in active_alarms:
+                    self._insert_alarm_event(
+                        vehicle_id, alarm["id"], "cleared_by_unlock", {}, updated_at
+                    )
+            else:
+                self.connection.execute(
+                    "UPDATE vehicle_state SET lock_state='locked',"
+                    "security_state=CASE WHEN active_alarm_id IS NULL "
+                    "THEN 'disarmed' ELSE 'alarm_active' END,"
+                    "grace_until=NULL,lock_state_source=?,lock_state_updated_at=?,updated_at=? "
+                    "WHERE vehicle_id=?",
+                    (source, updated_at, updated_at, vehicle_id),
+                )
+
+    def start_lock_grace(self, vehicle_id: str, grace_seconds: int = 300,
+                         now: Optional[int] = None) -> dict[str, Any]:
+        current_time = int(time.time()) if now is None else now
+        grace_until = current_time + grace_seconds
+        with self.connection:
+            self.connection.execute(
+                "UPDATE vehicle_state SET security_state='grace_period',grace_until=?,"
+                "updated_at=? WHERE vehicle_id=?",
+                (grace_until, current_time, vehicle_id),
+            )
+            self._insert_alarm_event(
+                vehicle_id, None, "grace_started",
+                {"grace_until": grace_until}, current_time,
+            )
+        return self.vehicle(vehicle_id)
+
+    def arm_security(self, vehicle_id: str, event_type: str = "manual_armed",
+                     now: Optional[int] = None) -> dict[str, Any]:
+        current_time = int(time.time()) if now is None else now
+        with self.connection:
+            self.connection.execute(
+                "UPDATE vehicle_state SET security_state='armed',grace_until=NULL,updated_at=? "
+                "WHERE vehicle_id=? AND active_alarm_id IS NULL",
+                (current_time, vehicle_id),
+            )
+            self._insert_alarm_event(vehicle_id, None, event_type, {}, current_time)
+        return self.vehicle(vehicle_id)
+
+    def arm_if_grace_expired(self, vehicle_id: str,
+                             now: Optional[int] = None) -> bool:
+        current_time = int(time.time()) if now is None else now
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE vehicle_state SET security_state='armed',grace_until=NULL,updated_at=? "
+                "WHERE vehicle_id=? AND security_state='grace_period' "
+                "AND grace_until IS NOT NULL AND grace_until<=?",
+                (current_time, vehicle_id, current_time),
+            )
+            if cursor.rowcount:
+                self._insert_alarm_event(
+                    vehicle_id, None, "grace_completed", {}, current_time
+                )
+        return bool(cursor.rowcount)
+
+    def record_movement_event(self, vehicle_id: str,
+                              now: Optional[int] = None) -> dict[str, Any]:
+        current_time = int(time.time()) if now is None else now
+        self.arm_if_grace_expired(vehicle_id, current_time)
+        state = self.connection.execute(
+            "SELECT security_state,grace_until FROM vehicle_state WHERE vehicle_id=?",
+            (vehicle_id,),
+        ).fetchone()
+        if state is None:
+            raise KeyError(vehicle_id)
+        if state["security_state"] == "grace_period":
+            with self.connection:
+                self._insert_alarm_event(
+                    vehicle_id, None, "movement_suppressed",
+                    {"grace_until": state["grace_until"]}, current_time,
+                )
+            return {"suppressed": True, "alarm": None, "should_notify": False}
+        if state["security_state"] not in {"armed", "alarm_active"}:
+            with self.connection:
+                self._insert_alarm_event(
+                    vehicle_id, None, "movement_disarmed", {}, current_time
+                )
+            return {"suppressed": False, "alarm": None, "should_notify": False}
+
+        existing = self.connection.execute(
+            "SELECT * FROM alarms WHERE vehicle_id=? AND alarm_type='illegal_movement' "
+            "AND state='active'",
+            (vehicle_id,),
+        ).fetchone()
+        alarm_id = existing["id"] if existing else str(uuid.uuid4())
+        should_notify = existing is None or current_time - existing["last_triggered_at"] >= 60
+        with self.connection:
+            if existing:
+                self.connection.execute(
+                    "UPDATE alarms SET last_triggered_at=?,trigger_count=trigger_count+1 "
+                    "WHERE id=?",
+                    (current_time, alarm_id),
+                )
+            else:
+                self.connection.execute(
+                    "INSERT INTO alarms(id,vehicle_id,alarm_type,state,inferred,"
+                    "first_triggered_at,last_triggered_at,trigger_count) "
+                    "VALUES(?,?,?,'active',0,?,?,1)",
+                    (alarm_id, vehicle_id, "illegal_movement", current_time, current_time),
+                )
+            self.connection.execute(
+                "UPDATE vehicle_state SET security_state='alarm_active',active_alarm_id=?,"
+                "grace_until=NULL,updated_at=? WHERE vehicle_id=?",
+                (alarm_id, current_time, vehicle_id),
+            )
+            self._insert_alarm_event(
+                vehicle_id, alarm_id,
+                "movement_triggered" if existing is None else "movement_repeated",
+                {"should_notify": should_notify}, current_time,
+            )
+        return {
+            "suppressed": False,
+            "alarm": self.alarm(alarm_id),
+            "should_notify": should_notify,
+        }
+
+    def acknowledge_alarm(self, vehicle_id: str, client_id: str,
+                          now: Optional[int] = None) -> Optional[dict[str, Any]]:
+        current_time = int(time.time()) if now is None else now
+        alarm = self.connection.execute(
+            "SELECT * FROM alarms WHERE vehicle_id=? AND state='active' "
+            "ORDER BY last_triggered_at DESC LIMIT 1",
+            (vehicle_id,),
+        ).fetchone()
+        if alarm is None:
+            return None
+        lock = self.connection.execute(
+            "SELECT lock_state FROM vehicle_state WHERE vehicle_id=?", (vehicle_id,)
+        ).fetchone()
+        security_state = "armed" if lock and lock["lock_state"] == "locked" else "disarmed"
+        with self.connection:
+            self.connection.execute(
+                "UPDATE alarms SET state='acknowledged',acknowledged_at=?,"
+                "acknowledged_by=? WHERE id=?",
+                (current_time, client_id, alarm["id"]),
+            )
+            self.connection.execute(
+                "UPDATE vehicle_state SET security_state=?,active_alarm_id=NULL,"
+                "grace_until=NULL,updated_at=? WHERE vehicle_id=?",
+                (security_state, current_time, vehicle_id),
+            )
+            self._insert_alarm_event(
+                vehicle_id, alarm["id"], "acknowledged", {}, current_time
+            )
+        return self.alarm(alarm["id"])
+
+    def alarm(self, alarm_id: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM alarms WHERE id=?", (alarm_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(alarm_id)
+        return self._alarm_dict(row)
+
+    def alarms(self, vehicle_id: str, active_only: bool = False,
+               limit: int = 100) -> list[dict[str, Any]]:
+        condition = " AND state='active'" if active_only else ""
+        rows = self.connection.execute(
+            "SELECT * FROM alarms WHERE vehicle_id=?" + condition
+            + " ORDER BY last_triggered_at DESC LIMIT ?",
+            (vehicle_id, max(1, min(limit, 500))),
+        ).fetchall()
+        return [self._alarm_dict(row) for row in rows]
+
+    def alarm_events(self, vehicle_id: str,
+                     limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM alarm_events WHERE vehicle_id=? ORDER BY id DESC LIMIT ?",
+            (vehicle_id, max(1, min(limit, 500))),
+        ).fetchall()
+        result = []
+        for row in rows:
+            event = dict(row)
+            event["detail"] = json.loads(event.pop("detail_json"))
+            result.append(event)
+        return result
+
+    def _insert_alarm_event(self, vehicle_id: str, alarm_id: Optional[str],
+                            event_type: str, detail: dict[str, Any],
+                            created_at: int) -> None:
+        self.connection.execute(
+            "INSERT INTO alarm_events(vehicle_id,alarm_id,event_type,detail_json,created_at) "
+            "VALUES(?,?,?,?,?)",
+            (vehicle_id, alarm_id, event_type,
+             json.dumps(detail, separators=(",", ":")), created_at),
+        )
 
     def vehicle(self, vehicle_id: str) -> dict[str, Any]:
         row = self.connection.execute(
@@ -285,7 +524,8 @@ class Database:
                       altitude_m: Optional[float], mode: Optional[str],
                       raw_fields: tuple[str, ...], min_satellites: int = 4,
                       max_hdop: float = 8.0,
-                      max_speed_mps: float = 25.0) -> dict[str, Any]:
+                      max_speed_mps: float = 25.0,
+                      alarm_id: Optional[str] = None) -> dict[str, Any]:
         received_at = int(time.time())
         raw_json = json.dumps(list(raw_fields), separators=(",", ":"))
         fingerprint = hashlib.sha256(
@@ -314,11 +554,11 @@ class Database:
             self.connection.execute(
                 "INSERT OR IGNORE INTO locations(vehicle_id,source,device_timestamp,received_at,"
                 "valid,latitude,longitude,satellites,hdop,altitude_m,mode,display_eligible,"
-                "rejection_reason,distance_from_previous_m,speed_mps,raw_fields_json,fingerprint) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "rejection_reason,distance_from_previous_m,speed_mps,alarm_id,"
+                "raw_fields_json,fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (vehicle_id, source, device_timestamp, received_at, int(valid), latitude,
                  longitude, satellites, hdop, altitude_m, mode, int(eligible), reason,
-                 distance, speed, raw_json, fingerprint),
+                 distance, speed, alarm_id, raw_json, fingerprint),
             )
         row = self.connection.execute(
             "SELECT * FROM locations WHERE vehicle_id=? AND fingerprint=?",
@@ -520,4 +760,10 @@ class Database:
         result["display_eligible"] = bool(result["display_eligible"])
         result["raw_fields"] = json.loads(result.pop("raw_fields_json"))
         result.pop("fingerprint", None)
+        return result
+
+    @staticmethod
+    def _alarm_dict(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["inferred"] = bool(result["inferred"])
         return result

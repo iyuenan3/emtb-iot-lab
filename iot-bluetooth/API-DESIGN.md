@@ -225,6 +225,8 @@ BLE 开关锁成功后，App 使用独立事件 UUID 调用 `POST /ble-events`�
 
 App 未运行不影响服务端告警处理。由于免费签名不保证 APNs，App 下次读取 `/vehicle` 或 `/alarms` 时展示活动告警。
 
+Build 12 已实现 `security.confirm_locked`、`security.arm`、`alarm.acknowledge` 和 `GET /api/v1/alarms`。逻辑关锁不会直接启动等待期，用户必须在核对仪表、动力和轮毂后提交独立签名确认。W0,1 在等待期只记录，布防后创建或合并告警，回复空字段 W0 确认，再串行执行受控 D1 300 秒与 D0。W0 云端帧和设备确认格式仍需实车验证，未验证前不外推协议模拟结果。
+
 ## 9. 在线与健康判断
 
 设备在线必须同时满足：存在当前会话，最近收到过有效协议帧，静默时间没有超过阈值。仅有 TCP `ESTABLISHED` 不算在线。

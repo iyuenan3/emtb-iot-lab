@@ -70,6 +70,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         for task in self.service._timeout_tasks.values():
             task.cancel()
+        if self.service._grace_task:
+            self.service._grace_task.cancel()
+            await asyncio.gather(self.service._grace_task, return_exceptions=True)
         self.database.close()
         self.temp.cleanup()
 
@@ -335,6 +338,171 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         active = self.database.active_command(self.service.vehicle_id)
         self.assertEqual(active["command_type"], "tracking.set_policy")
         self.assertIn(b",D1,3600#", self.writer.data)
+
+    async def test_physical_lock_confirmation_starts_grace_period(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", int(time.time())
+        )
+        command = self.create(
+            "security.confirm_locked",
+            parameters={"physical_lock_confirmed": True},
+        )
+        await self.service.dispatch_command(command["id"])
+        result = self.database.command(command["id"])
+        vehicle = self.database.vehicle(self.service.vehicle_id)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(vehicle["security_state"], "grace_period")
+        self.assertGreater(vehicle["grace_until"], int(time.time()))
+        self.assertIsNotNone(self.service._grace_task)
+
+    async def test_manual_arm_requires_unlocked_warning_confirmation(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "unlocked", "test", int(time.time())
+        )
+        rejected = self.create("security.arm")
+        await self.service.dispatch_command(rejected["id"])
+        self.assertEqual(
+            self.database.command(rejected["id"])["error_code"],
+            "unlocked_arm_warning_required",
+        )
+
+        accepted = self.create(
+            "security.arm", parameters={"unlocked_warning_confirmed": True}
+        )
+        await self.service.dispatch_command(accepted["id"])
+        result = self.database.command(accepted["id"])
+        self.assertEqual(result["status"], "succeeded")
+        self.assertTrue(result["result"]["mechanical_lock_warning"])
+        self.assertEqual(
+            self.database.vehicle(self.service.vehicle_id)["security_state"], "armed"
+        )
+
+    async def test_w0_grace_is_suppressed_and_acknowledged(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", int(time.time())
+        )
+        self.database.start_lock_grace(self.service.vehicle_id, 300)
+        self.writer.data.clear()
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "W0", ("1",)
+        ))
+        self.assertIn(b",W0#", self.writer.data)
+        self.assertEqual(self.database.alarms(self.service.vehicle_id), [])
+        self.assertIsNone(self.database.active_command(self.service.vehicle_id))
+        self.assertEqual(
+            self.database.alarm_events(self.service.vehicle_id)[0]["event_type"],
+            "movement_suppressed",
+        )
+
+    async def test_w0_alarm_runs_d1_then_d0_and_alarm_api(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", int(time.time())
+        )
+        self.database.arm_security(self.service.vehicle_id)
+        self.writer.data.clear()
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "W0", ("1",)
+        ))
+        alarm = self.database.alarms(self.service.vehicle_id, active_only=True)[0]
+        active = self.database.active_command(self.service.vehicle_id)
+        self.assertEqual(active["command_type"], "tracking.set_policy")
+        self.assertIn(b",W0#", self.writer.data)
+        self.assertIn(b",D1,300#", self.writer.data)
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "D1", ("300",)
+        ))
+        active = self.database.active_command(self.service.vehicle_id)
+        self.assertEqual(active["command_type"], "location.once")
+        self.assertIn(b",D0#", self.writer.data)
+        fields = (
+            "0", "124458.00", "A", "2237.7514", "N", "11408.6214", "E",
+            "6", "0.21", "151216", "10", "M", "A",
+        )
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "D0", fields
+        ))
+        location = self.database.latest_location(self.service.vehicle_id)
+        self.assertEqual(location["source"], "alarm")
+        self.assertEqual(location["alarm_id"], alarm["id"])
+        self.assertIsNone(self.service._alarm_workflow)
+
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        code = self.database.create_pairing_code()
+        paired = self.database.complete_pairing(code, "iPhone", "token", public)
+        payload, status = await self.service.route(HTTPSpec(
+            "GET", "/api/v1/alarms", "state=active",
+            {"x-client-id": paired["client_id"], "authorization": "Bearer token"}, b"",
+        ))
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["alarms"][0]["id"], alarm["id"])
+
+    async def test_alarm_workflow_uses_confirmed_d1_without_resending(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", int(time.time())
+        )
+        self.database.arm_security(self.service.vehicle_id)
+        self.database.update_vehicle_state(
+            self.service.vehicle_id,
+            desired_tracking_interval=300,
+            confirmed_tracking_interval=300,
+        )
+        self.writer.data.clear()
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "W0", ("1",)
+        ))
+        active = self.database.active_command(self.service.vehicle_id)
+        self.assertEqual(active["command_type"], "location.once")
+        self.assertNotIn(b",D1,300#", self.writer.data)
+        self.assertIn(b",D0#", self.writer.data)
+
+    async def test_w0_waits_for_existing_command_before_alarm_workflow(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", int(time.time())
+        )
+        self.database.arm_security(self.service.vehicle_id)
+        find_sound = self.create("vehicle.find_sound")
+        await self.service.dispatch_command(find_sound["id"])
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "W0", ("1",)
+        ))
+        self.assertEqual(
+            self.database.active_command(self.service.vehicle_id)["id"], find_sound["id"]
+        )
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "V0", ("2",)
+        ))
+        active = self.database.active_command(self.service.vehicle_id)
+        self.assertEqual(active["command_type"], "tracking.set_policy")
+        self.assertEqual(active["parameters"]["interval_seconds"], 300)
+
+    async def test_background_start_completes_expired_grace(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", 100
+        )
+        self.database.start_lock_grace(self.service.vehicle_id, 300, now=100)
+        await self.service.start_background_tasks()
+        self.assertEqual(
+            self.database.vehicle(self.service.vehicle_id)["security_state"], "armed"
+        )
+        self.assertIsNone(self.service._grace_task)
+
+    async def test_alarm_acknowledge_succeeds_offline_without_queued_d1(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", int(time.time())
+        )
+        self.database.arm_security(self.service.vehicle_id)
+        alarm = self.database.record_movement_event(self.service.vehicle_id)["alarm"]
+        self.writer.closed = True
+        command = self.create("alarm.acknowledge")
+        await self.service.dispatch_command(command["id"])
+        self.assertEqual(self.database.command(command["id"])["status"], "succeeded")
+        self.assertEqual(self.database.alarm(alarm["id"])["state"], "acknowledged")
+        vehicle = self.database.vehicle(self.service.vehicle_id)
+        self.assertEqual(vehicle["security_state"], "armed")
+        self.assertEqual(vehicle["desired_tracking_interval"], 3600)
+        self.assertIsNone(self.database.active_command(self.service.vehicle_id))
 
     async def test_connectivity_transitions_disable_commands(self):
         clock = asyncio.get_running_loop().time()

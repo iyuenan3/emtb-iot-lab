@@ -41,9 +41,11 @@ private struct VehicleHomeView: View {
         ScrollView {
             VStack(spacing: 16) {
                 vehicleHero
+                if let activeAlarm { alarmCard(activeAlarm) }
                 controlCard
                 if let lockConflictText { lockConflictBanner(lockConflictText) }
                 statusGrid
+                securityControlCard
                 if !statusMessage.isEmpty { operationBanner }
                 safetyNote
             }
@@ -54,6 +56,10 @@ private struct VehicleHomeView: View {
         .refreshable { await refreshSelectedChannel() }
         .task {
             if remote.isPaired { await remote.refresh() }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                await remote.poll()
+            }
         }
     }
 
@@ -187,6 +193,92 @@ private struct VehicleHomeView: View {
         }
     }
 
+    @ViewBuilder private var securityControlCard: some View {
+        if remote.isPaired {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("车辆布防", systemImage: "shield.lefthalf.filled")
+                    .font(.headline)
+                if let graceUntil = remote.vehicle?.graceUntil,
+                   remote.vehicle?.securityState == "grace_period" {
+                    Text("自动布防倒计时")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(
+                        timerInterval: Date()...max(
+                            Date(), Date(timeIntervalSince1970: TimeInterval(graceUntil))
+                        ),
+                        countsDown: true
+                    )
+                    .font(.title2.monospacedDigit().bold())
+                } else if remote.vehicle?.securityState == "disarmed" {
+                    if selectedLocked == true {
+                        Text("现场确认仪表熄灭、动力断开、轮毂不能转动后，再启动 5 分钟等待。")
+                            .font(.footnote).foregroundStyle(.orange)
+                        LongPressActionButton(
+                            title: "长按确认物理关锁", icon: "checkmark.shield", color: .indigo,
+                            enabled: remote.capabilities["security.confirm_locked"]?.enabled == true
+                                && !remote.isBusy
+                        ) {
+                            Task {
+                                await remote.send(
+                                    "security.confirm_locked", requiresOwnerPresence: true,
+                                    parameters: ["physical_lock_confirmed": true]
+                                )
+                            }
+                        }
+                    }
+                    Text("手动布防不会改变机械锁。车辆仍开锁时也可使用，但必须明确承担误触风险。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    LongPressActionButton(
+                        title: "长按手动布防", icon: "shield.fill", color: .orange,
+                        enabled: remote.capabilities["security.arm"]?.enabled == true
+                            && !remote.isBusy
+                    ) {
+                        Task {
+                            await remote.send(
+                                "security.arm", requiresOwnerPresence: true,
+                                parameters: ["unlocked_warning_confirmed": true]
+                            )
+                        }
+                    }
+                } else {
+                    Text(securityText).font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+            )
+        }
+    }
+
+    private func alarmCard(_ alarm: RemoteAlarm) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(alarm.inferred ? "疑似离线期间移动" : "车辆异常移动", systemImage: "exclamationmark.triangle.fill")
+                .font(.title3.bold())
+            Text("触发 \(alarm.triggerCount) 次，最近一次 \(Date(timeIntervalSince1970: TimeInterval(alarm.lastTriggeredAt)).formatted(date: .abbreviated, time: .standard))")
+                .font(.callout)
+            HStack {
+                Button("确认并解除", systemImage: "checkmark.shield.fill") {
+                    Task {
+                        await remote.send("alarm.acknowledge", requiresOwnerPresence: true)
+                    }
+                }
+                .disabled(remote.capabilities["alarm.acknowledge"]?.enabled != true || remote.isBusy)
+                Button("声音找车", systemImage: "speaker.wave.2.fill") {
+                    Task { await remote.send("vehicle.find_sound") }
+                }
+                .disabled(remote.capabilities["vehicle.find_sound"]?.enabled != true || remote.isBusy)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .foregroundStyle(.red)
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 22))
+    }
+
     private var operationBanner: some View {
         HStack(spacing: 12) {
             if isBusy { ProgressView() }
@@ -288,9 +380,14 @@ private struct VehicleHomeView: View {
         switch remote.vehicle?.securityState {
         case "armed": return "已布防"
         case "disarmed": return "已撤防"
-        case "alerting": return "告警中"
+        case "grace_period": return "等待布防"
+        case "alarm_active": return "告警中"
         default: return "未读取"
         }
+    }
+
+    private var activeAlarm: RemoteAlarm? {
+        remote.alarms.first(where: { $0.state == "active" })
     }
 
     private var trackingPolicyText: String {
@@ -479,7 +576,29 @@ private struct ActivityView: View {
             }
             Section("骑行与告警") {
                 Label("轨迹历史尚未实现", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
-                Label("异常移动告警尚未实现", systemImage: "exclamationmark.triangle")
+                if remote.alarms.isEmpty {
+                    Label("暂无告警记录", systemImage: "checkmark.shield")
+                } else {
+                    ForEach(remote.alarms) { alarm in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Label(
+                                    alarm.inferred ? "疑似离线移动" : "异常移动",
+                                    systemImage: "exclamationmark.triangle"
+                                )
+                                Spacer()
+                                Text(alarmStateName(alarm.state)).font(.caption.bold())
+                            }
+                            Text("触发 \(alarm.triggerCount) 次")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text(
+                                Date(timeIntervalSince1970: TimeInterval(alarm.lastTriggeredAt)),
+                                style: .relative
+                            )
+                            .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
         }
         .navigationTitle("活动记录")
@@ -489,7 +608,8 @@ private struct ActivityView: View {
     private func commandName(_ value: String) -> String {
         ["vehicle.unlock": "远程开锁", "vehicle.lock": "远程关锁", "vehicle.find_sound": "声音找车",
          "telemetry.refresh": "读取设备信息", "location.once": "单次定位",
-         "tracking.set_policy": "定位策略"][value] ?? value
+         "tracking.set_policy": "定位策略", "security.confirm_locked": "确认物理关锁",
+         "security.arm": "手动布防", "alarm.acknowledge": "解除告警"][value] ?? value
     }
 
     private func commandIcon(_ value: String) -> String {
@@ -504,6 +624,10 @@ private struct ActivityView: View {
 
     private func statusColor(_ value: String) -> Color {
         switch value { case "succeeded", "noop": return .green; case "failed", "rejected": return .red; case "unknown": return .orange; default: return .secondary }
+    }
+
+    private func alarmStateName(_ value: String) -> String {
+        ["active": "活动", "acknowledged": "已确认", "cleared": "已解除"][value] ?? value
     }
 }
 

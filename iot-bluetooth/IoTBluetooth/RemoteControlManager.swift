@@ -3,6 +3,7 @@ import Foundation
 import LocalAuthentication
 import Security
 import UIKit
+import AudioToolbox
 
 struct RemoteVehicle: Decodable {
     let id: String
@@ -16,6 +17,8 @@ struct RemoteVehicle: Decodable {
     let powerMv: Int?
     let batteryPercent: Int?
     let securityState: String
+    let graceUntil: Int?
+    let activeAlarmID: String?
     let desiredTrackingInterval: Int?
     let confirmedTrackingInterval: Int?
     let trackingConfirmedAt: Int?
@@ -33,6 +36,8 @@ struct RemoteVehicle: Decodable {
         case powerMv = "power_mv"
         case batteryPercent = "battery_percent"
         case securityState = "security_state"
+        case graceUntil = "grace_until"
+        case activeAlarmID = "active_alarm_id"
         case desiredTrackingInterval = "desired_tracking_interval"
         case confirmedTrackingInterval = "confirmed_tracking_interval"
         case trackingConfirmedAt = "tracking_confirmed_at"
@@ -45,10 +50,34 @@ struct RemoteCapability: Decodable {
     let enabled: Bool
     let reason: String?
     let cooldownSeconds: Int?
+    let graceSeconds: Int?
 
     enum CodingKeys: String, CodingKey {
         case enabled, reason
         case cooldownSeconds = "cooldown_seconds"
+        case graceSeconds = "grace_seconds"
+    }
+}
+
+struct RemoteAlarm: Decodable, Identifiable {
+    let id: String
+    let alarmType: String
+    let state: String
+    let inferred: Bool
+    let firstTriggeredAt: Int
+    let lastTriggeredAt: Int
+    let triggerCount: Int
+    let acknowledgedAt: Int?
+    let clearedAt: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, state, inferred
+        case alarmType = "alarm_type"
+        case firstTriggeredAt = "first_triggered_at"
+        case lastTriggeredAt = "last_triggered_at"
+        case triggerCount = "trigger_count"
+        case acknowledgedAt = "acknowledged_at"
+        case clearedAt = "cleared_at"
     }
 }
 
@@ -148,11 +177,15 @@ final class RemoteControlManager: ObservableObject {
     @Published private(set) var vehicle: RemoteVehicle?
     @Published private(set) var capabilities: [String: RemoteCapability] = [:]
     @Published private(set) var commands: [RemoteCommand] = []
+    @Published private(set) var alarms: [RemoteAlarm] = []
     @Published private(set) var latestLocation: RemoteLocation?
     @Published private(set) var lastLocationReport: RemoteLocation?
     @Published private(set) var locations: [RemoteLocation] = []
     @Published private(set) var isBusy = false
     @Published private(set) var message = ""
+    private var lastAlertMarker: String?
+    private var lastAlertAt: Date?
+    private var lastAlertID: String?
 
     var isPaired: Bool {
         RemoteCredentialVault.clientID != nil && RemoteCredentialVault.readToken != nil
@@ -197,6 +230,11 @@ final class RemoteControlManager: ObservableObject {
         }
     }
 
+    func poll() async {
+        guard isPaired, !isBusy else { return }
+        do { try await loadRemoteData() } catch { }
+    }
+
     func syncBLELockState(isLocked: Bool, observedAt: Date) async {
         guard isPaired else { return }
         for _ in 0..<35 where isBusy {
@@ -229,7 +267,14 @@ final class RemoteControlManager: ObservableObject {
               parameters: [String: Any] = [:]) async {
         await perform {
             if requiresOwnerPresence {
-                try await self.confirmOwnerPresence(reason: type == "vehicle.unlock" ? "确认远程开锁" : "确认远程关锁")
+                let reason = [
+                    "vehicle.unlock": "确认远程开锁",
+                    "vehicle.lock": "确认远程关锁",
+                    "security.confirm_locked": "确认车辆已经完成物理关锁",
+                    "security.arm": "确认手动布防",
+                    "alarm.acknowledge": "确认并解除车辆告警",
+                ][type] ?? "确认车辆操作"
+                try await self.confirmOwnerPresence(reason: reason)
             }
             let response = try await self.request(
                 path: "/api/v1/commands", method: "POST",
@@ -259,9 +304,13 @@ final class RemoteControlManager: ObservableObject {
         vehicle = nil
         capabilities = [:]
         commands = []
+        alarms = []
         latestLocation = nil
         lastLocationReport = nil
         locations = []
+        lastAlertMarker = nil
+        lastAlertAt = nil
+        lastAlertID = nil
         message = "已清除远程配对"
         objectWillChange.send()
     }
@@ -300,6 +349,17 @@ final class RemoteControlManager: ObservableObject {
             from: JSONSerialization.data(withJSONObject: commandObject)
         )
         do {
+            let alarmResponse = try await request(path: "/api/v1/alarms")
+            if let alarmObject = alarmResponse["alarms"] {
+                let loaded = try decoder.decode(
+                    [RemoteAlarm].self,
+                    from: JSONSerialization.data(withJSONObject: alarmObject)
+                )
+                alarms = loaded
+                notifyForNewestActiveAlarm(loaded)
+            }
+        } catch { }
+        do {
             let locationResponse = try await request(path: "/api/v1/locations?limit=500")
             latestLocation = try decodeOptionalLocation(locationResponse["latest"], decoder: decoder)
             lastLocationReport = try decodeOptionalLocation(locationResponse["last_report"], decoder: decoder)
@@ -310,6 +370,23 @@ final class RemoteControlManager: ObservableObject {
                 )
             }
         } catch { }
+    }
+
+    private func notifyForNewestActiveAlarm(_ loaded: [RemoteAlarm]) {
+        guard let alarm = loaded.first(where: { $0.state == "active" }) else { return }
+        let marker = "\(alarm.id):\(alarm.lastTriggeredAt)"
+        guard marker != lastAlertMarker else { return }
+        lastAlertMarker = marker
+        let now = Date()
+        if lastAlertID == alarm.id,
+           let lastAlertAt,
+           now.timeIntervalSince(lastAlertAt) < 60 {
+            return
+        }
+        lastAlertID = alarm.id
+        lastAlertAt = now
+        UINotificationFeedbackGenerator().notificationOccurred(.error)
+        AudioServicesPlaySystemSound(1005)
     }
 
     private func decodeOptionalLocation(_ object: Any?, decoder: JSONDecoder) throws -> RemoteLocation? {
@@ -345,6 +422,12 @@ final class RemoteControlManager: ObservableObject {
             return "单次定位已完成，请打开地图查看最新位置"
         case "succeeded" where command.commandType == "vehicle.lock":
             return "IoT 已确认关锁。请确认仪表熄灭、车辆动力断开、轮毂不能转动"
+        case "succeeded" where command.commandType == "security.confirm_locked":
+            return "已开始 5 分钟布防等待，等待期内移动只记录不提醒"
+        case "succeeded" where command.commandType == "security.arm":
+            return "车辆已手动布防，机械锁状态保持独立"
+        case "succeeded" where command.commandType == "alarm.acknowledge":
+            return "告警已确认并解除，定位策略将按当前锁状态恢复"
         case "succeeded":
             return "设备操作成功"
         case "noop":

@@ -64,7 +64,14 @@ struct RemoteControlView: View {
                 }
             }
             LabeledContent("电量", value: remote.vehicle?.batteryPercent.map { "\($0)%" } ?? "未读取")
-            LabeledContent("布防", value: remote.vehicle?.securityState ?? "未读取")
+            LabeledContent("布防", value: securityText)
+            if let graceUntil = remote.vehicle?.graceUntil {
+                LabeledContent(
+                    "自动布防时间",
+                    value: Date(timeIntervalSince1970: TimeInterval(graceUntil))
+                        .formatted(date: .abbreviated, time: .standard)
+                )
+            }
             LabeledContent("定位策略", value: trackingPolicyText)
             LabeledContent("最后通信", value: lastSeenText)
         }
@@ -157,6 +164,16 @@ struct RemoteControlView: View {
         }
     }
 
+    private var securityText: String {
+        switch remote.vehicle?.securityState {
+        case "disarmed": return "已撤防"
+        case "grace_period": return "等待布防"
+        case "armed": return "已布防"
+        case "alarm_active": return "告警中"
+        default: return "未读取"
+        }
+    }
+
     private var serverLocked: Bool? {
         switch remote.vehicle?.lockState {
         case "locked": return true
@@ -202,7 +219,8 @@ struct RemoteControlView: View {
     private func commandName(_ value: String) -> String {
         ["vehicle.unlock": "开锁", "vehicle.lock": "关锁", "vehicle.find_sound": "声音找车",
          "telemetry.refresh": "读取设备信息", "location.once": "单次定位",
-         "tracking.set_policy": "定位策略"][value] ?? value
+         "tracking.set_policy": "定位策略", "security.confirm_locked": "确认物理关锁",
+         "security.arm": "手动布防", "alarm.acknowledge": "解除告警"][value] ?? value
     }
 
     private func statusName(_ value: String) -> String {

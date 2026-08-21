@@ -4,7 +4,7 @@
 
 | 范围 | 命令 | 当前覆盖 |
 | --- | --- | --- |
-| 远程服务 | `cd ../iot-remote && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 38 项，覆盖签名、BLE 状态同步、数据库、D0 转换与去重、定位质量过滤、D1 期望与确认分离、新会话协调、单命令串行、位置 API、协议、命令状态机、通信静默、部署版本读回，以及真实活动 TCP 设备连接下的优雅停机 |
+| 远程服务 | `cd ../iot-remote && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 49 项，覆盖签名、BLE 状态同步、数据库、D0 转换与去重、定位质量、D1、新会话协调、布防等待、W0 抑制和合并、D1 与 D0 串行、离线解除告警、活动告警期间重复关锁、位置与告警 API、命令状态机、通信静默、部署版本读回，以及真实活动 TCP 设备连接下的优雅停机 |
 | iOS 编译 | `xcodebuild -project IoTBluetooth.xcodeproj -scheme IoTBluetooth -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build` | Swift 类型检查、资源和工程配置 |
 
 iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 CoreBluetooth、Face ID、真机网络或车辆物理动作正确。
@@ -34,4 +34,4 @@ iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 Cor
 4. 结果未知时不出现自动重试。
 5. 密钥不出现在日志、截图文案和构建产物配置中。
 6. D0 为 `V` 时不覆盖最后有效位置，轨迹间隔超过 10 分钟时不跨缺口连线。
-7. 未实现告警时，界面明确标注缺口。
+7. 等待期 W0 只记录不提醒，布防后同一告警的前台声音与触感至少间隔 60 秒，解除需要设备身份验证。

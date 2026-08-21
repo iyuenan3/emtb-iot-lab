@@ -17,11 +17,16 @@ from .protocol import Frame, build_downlink, parse_d0, parse_frame, split_frames
 
 LOGGER = logging.getLogger("iot_remote")
 TERMINAL = {"succeeded", "failed", "unknown", "noop", "rejected"}
-SIGNED_COMMANDS = {"vehicle.unlock", "vehicle.lock", "tracking.set_policy"}
+SIGNED_COMMANDS = {
+    "vehicle.unlock", "vehicle.lock", "tracking.set_policy",
+    "security.confirm_locked", "security.arm", "alarm.acknowledge",
+}
 SUPPORTED_COMMANDS = {
     "vehicle.unlock", "vehicle.lock", "vehicle.find_sound",
     "telemetry.refresh", "location.once", "tracking.set_policy",
+    "security.confirm_locked", "security.arm", "alarm.acknowledge",
 }
+SERVER_COMMANDS = {"security.confirm_locked", "security.arm", "alarm.acknowledge"}
 TRACKING_POLICIES = {"unlocked": 60, "locked": 3600, "alarm": 300}
 
 
@@ -56,12 +61,15 @@ class RemoteService:
                  offline_window: int = 720, revision: str = "dev",
                  location_min_satellites: int = 4,
                  location_max_hdop: float = 8.0,
-                 location_max_speed_mps: float = 25.0):
+                 location_max_speed_mps: float = 25.0,
+                 lock_grace_seconds: int = 300):
         if silence_window <= 0 or offline_window <= silence_window:
             raise ValueError("通信静默与离线阈值无效")
         if (location_min_satellites < 0 or location_max_hdop <= 0
                 or location_max_speed_mps <= 0):
             raise ValueError("定位质量阈值无效")
+        if lock_grace_seconds <= 0:
+            raise ValueError("布防等待时间无效")
         self.database = database
         self.target_imei = target_imei
         self.vehicle_id = database.ensure_vehicle(target_imei, vehicle_name)
@@ -72,11 +80,14 @@ class RemoteService:
         self.location_min_satellites = location_min_satellites
         self.location_max_hdop = location_max_hdop
         self.location_max_speed_mps = location_max_speed_mps
+        self.lock_grace_seconds = lock_grace_seconds
         self.session: Optional[DeviceSession] = None
         self._session_lock = asyncio.Lock()
         self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._pairing_failures: list[float] = []
         self._policy_reconcile_pending = False
+        self._grace_task: Optional[asyncio.Task[None]] = None
+        self._alarm_workflow: Optional[dict[str, str]] = None
         self.database.mark_inflight_unknown()
 
     def is_online(self) -> bool:
@@ -98,6 +109,11 @@ class RemoteService:
         return max(0, int(time.monotonic() - self.session.last_frame_at))
 
     async def shutdown(self) -> None:
+        if self._grace_task:
+            self._grace_task.cancel()
+            await asyncio.gather(self._grace_task, return_exceptions=True)
+            self._grace_task = None
+        self._alarm_workflow = None
         for task in self._timeout_tasks.values():
             task.cancel()
         if self._timeout_tasks:
@@ -145,6 +161,7 @@ class RemoteService:
                 if self.session and self.session.writer is writer:
                     self.session = None
                     self._policy_reconcile_pending = False
+                    self._alarm_workflow = None
                     self.database.update_vehicle_state(self.vehicle_id, online=0)
                     active = self.database.active_command(self.vehicle_id)
                     if active:
@@ -174,6 +191,7 @@ class RemoteService:
         reconcile_new_session = False
         location_report = None
         stored_location = None
+        movement_alarm_id = None
         if frame.function == "H0" and len(fields) >= 4:
             state_time = int(time.time())
             updates: dict[str, Any] = {
@@ -200,9 +218,16 @@ class RemoteService:
         elif frame.function == "D0":
             location_report = parse_d0(fields)
             if location_report is not None:
+                active_location = self.database.active_command(self.vehicle_id)
+                source = location_report.source
+                alarm_id = None
+                if (active_location and active_location["command_type"] == "location.once"
+                        and active_location["parameters"].get("location_source")):
+                    source = active_location["parameters"]["location_source"]
+                    alarm_id = active_location["parameters"].get("alarm_id")
                 stored_location = self.database.save_location(
                     self.vehicle_id,
-                    source=location_report.source,
+                    source=source,
                     device_timestamp=location_report.device_timestamp,
                     valid=location_report.valid,
                     latitude=location_report.latitude,
@@ -215,10 +240,23 @@ class RemoteService:
                     min_satellites=self.location_min_satellites,
                     max_hdop=self.location_max_hdop,
                     max_speed_mps=self.location_max_speed_mps,
+                    alarm_id=alarm_id,
                 )
+        elif frame.function == "W0":
+            await self._send("W0", [])
+            if fields == ("1",):
+                movement = self.database.record_movement_event(self.vehicle_id)
+                if movement["alarm"] is not None and self._alarm_workflow is None:
+                    movement_alarm_id = movement["alarm"]["id"]
+                    self._alarm_workflow = {
+                        "alarm_id": movement_alarm_id,
+                        "stage": "tracking",
+                    }
 
         active = self.database.active_command(self.vehicle_id)
         if active is None:
+            if movement_alarm_id:
+                await self._advance_alarm_workflow()
             if reconcile_new_session:
                 await self._reconcile_pending_policy()
             return
@@ -280,22 +318,26 @@ class RemoteService:
             )
             if frame.function == expected_function and not scheduled_location:
                 self._finish(active["id"], "failed", "invalid_device_response")
-                if command_type != "tracking.set_policy":
+                if command_type == "tracking.set_policy" and self._alarm_workflow:
+                    await self._advance_alarm_workflow()
+                elif command_type == "location.once" and self._alarm_workflow:
+                    if self._alarm_workflow["stage"] == "awaiting_location":
+                        self._alarm_workflow = None
+                    else:
+                        await self._advance_alarm_workflow()
+                elif command_type != "tracking.set_policy":
                     await self._reconcile_pending_policy()
             return
         if frame.function in {"L0", "L1"}:
             await self._send(frame.function, [])
         if command_type == "vehicle.unlock":
-            self.database.update_vehicle_state(
-                self.vehicle_id, lock_state="unlocked", security_state="disarmed",
-                active_unlock_user=parameters["user_id"],
-                active_unlock_timestamp=parameters["timestamp"],
-                lock_state_source="remote_command", lock_state_updated_at=int(time.time()),
+            self.database.apply_confirmed_lock_state(
+                self.vehicle_id, "unlocked", "remote_command", int(time.time()),
+                parameters["user_id"], parameters["timestamp"],
             )
         elif command_type == "vehicle.lock":
-            self.database.update_vehicle_state(
-                self.vehicle_id, lock_state="locked", security_state="disarmed",
-                lock_state_source="remote_command", lock_state_updated_at=int(time.time()),
+            self.database.apply_confirmed_lock_state(
+                self.vehicle_id, "locked", "remote_command", int(time.time())
             )
         elif command_type == "tracking.set_policy":
             self.database.update_vehicle_state(
@@ -317,8 +359,73 @@ class RemoteService:
         if command_type in {"vehicle.unlock", "vehicle.lock"}:
             self._policy_reconcile_pending = False
             await self.reconcile_tracking_policy("lock_state_changed")
+        elif command_type == "tracking.set_policy" and self._alarm_workflow:
+            await self._advance_alarm_workflow()
+        elif command_type == "location.once" and self._alarm_workflow:
+            if self._alarm_workflow["stage"] == "awaiting_location":
+                self._alarm_workflow = None
+            else:
+                await self._advance_alarm_workflow()
         elif command_type != "tracking.set_policy":
             await self._reconcile_pending_policy()
+            await self._advance_alarm_workflow()
+
+    async def start_background_tasks(self) -> None:
+        self.database.arm_if_grace_expired(self.vehicle_id)
+        self._schedule_grace_timer()
+
+    def _schedule_grace_timer(self) -> None:
+        if self._grace_task:
+            self._grace_task.cancel()
+            self._grace_task = None
+        vehicle = self.database.vehicle(self.vehicle_id)
+        if vehicle["security_state"] != "grace_period" or vehicle["grace_until"] is None:
+            return
+        delay = max(0, vehicle["grace_until"] - int(time.time()))
+        self._grace_task = asyncio.create_task(self._complete_grace_after(delay))
+
+    async def _complete_grace_after(self, delay: int) -> None:
+        try:
+            await asyncio.sleep(delay)
+            self.database.arm_if_grace_expired(self.vehicle_id)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._grace_task is asyncio.current_task():
+                self._grace_task = None
+
+    async def _advance_alarm_workflow(self) -> None:
+        workflow = self._alarm_workflow
+        if workflow is None or self.database.active_command(self.vehicle_id):
+            return
+        if not self.is_online():
+            self._alarm_workflow = None
+            return
+        if workflow["stage"] == "tracking":
+            self.database.update_vehicle_state(
+                self.vehicle_id, desired_tracking_interval=TRACKING_POLICIES["alarm"]
+            )
+            workflow["stage"] = "location"
+            vehicle = self.database.vehicle(self.vehicle_id)
+            if vehicle["confirmed_tracking_interval"] != TRACKING_POLICIES["alarm"]:
+                command, _ = self.database.create_command(
+                    self.vehicle_id, None, "tracking.set_policy",
+                    {"interval_seconds": TRACKING_POLICIES["alarm"],
+                     "reason": "alarm_workflow"}, None,
+                )
+                await self.dispatch_command(command["id"])
+                if self.database.command(command["id"])["status"] in TERMINAL:
+                    await self._advance_alarm_workflow()
+                return
+        if workflow["stage"] == "location":
+            workflow["stage"] = "awaiting_location"
+            command, _ = self.database.create_command(
+                self.vehicle_id, None, "location.once",
+                {"location_source": "alarm", "alarm_id": workflow["alarm_id"]}, None,
+            )
+            await self.dispatch_command(command["id"])
+            if self.database.command(command["id"])["status"] in TERMINAL:
+                self._alarm_workflow = None
 
     def desired_tracking_interval(self) -> Optional[int]:
         vehicle = self.database.vehicle(self.vehicle_id)
@@ -370,6 +477,9 @@ class RemoteService:
             return
         command_type = command["command_type"]
         vehicle = self.database.vehicle(self.vehicle_id)
+        if command_type in SERVER_COMMANDS:
+            await self._dispatch_server_command(command, vehicle)
+            return
         if not self.is_online():
             self._finish(command_id, "rejected", "device_offline")
             return
@@ -424,14 +534,78 @@ class RemoteService:
             return
         self._timeout_tasks[command_id] = asyncio.create_task(self._expire(command_id))
 
+    async def _dispatch_server_command(self, command: dict[str, Any],
+                                       vehicle: dict[str, Any]) -> None:
+        command_id = command["id"]
+        command_type = command["command_type"]
+        if command_type == "security.confirm_locked":
+            if command["parameters"].get("physical_lock_confirmed") is not True:
+                self._finish(command_id, "rejected", "physical_confirmation_required")
+                return
+            if vehicle["lock_state"] != "locked":
+                self._finish(command_id, "rejected", "physical_lock_not_confirmed")
+                return
+            if vehicle["active_alarm_id"] is not None:
+                self._finish(command_id, "rejected", "active_alarm_exists")
+                return
+            updated = self.database.start_lock_grace(
+                self.vehicle_id, self.lock_grace_seconds
+            )
+            self._schedule_grace_timer()
+            self._finish(
+                command_id, "succeeded", None,
+                {"security_state": updated["security_state"],
+                 "grace_until": updated["grace_until"]},
+            )
+            await self.reconcile_tracking_policy("physical_lock_confirmed")
+            return
+        if command_type == "security.arm":
+            if (vehicle["lock_state"] != "locked"
+                    and command["parameters"].get("unlocked_warning_confirmed") is not True):
+                self._finish(command_id, "rejected", "unlocked_arm_warning_required")
+                return
+            if vehicle["active_alarm_id"] is not None:
+                self._finish(command_id, "rejected", "active_alarm_exists")
+                return
+            updated = self.database.arm_security(self.vehicle_id)
+            self._schedule_grace_timer()
+            self._finish(
+                command_id, "succeeded", None,
+                {"security_state": updated["security_state"],
+                 "mechanical_lock_warning": updated["lock_state"] != "locked"},
+            )
+            await self.reconcile_tracking_policy("manual_armed")
+            return
+        alarm = self.database.acknowledge_alarm(
+            self.vehicle_id, command["client_id"] or "internal"
+        )
+        if alarm is None:
+            self._finish(command_id, "noop", None, {"reason": "no_active_alarm"})
+            return
+        self._alarm_workflow = None
+        self._finish(
+            command_id, "succeeded", None,
+            {"alarm_id": alarm["id"], "alarm_state": alarm["state"]},
+        )
+        await self.reconcile_tracking_policy("alarm_acknowledged")
+
     async def _expire(self, command_id: str) -> None:
         try:
             await asyncio.sleep(self.command_timeout)
             command = self.database.command(command_id)
             if command["status"] not in TERMINAL:
                 self._finish(command_id, "unknown", "device_timeout")
-                if command["command_type"] != "tracking.set_policy":
+                if (command["command_type"] == "tracking.set_policy"
+                        and self._alarm_workflow):
+                    await self._advance_alarm_workflow()
+                elif command["command_type"] == "location.once" and self._alarm_workflow:
+                    if self._alarm_workflow["stage"] == "awaiting_location":
+                        self._alarm_workflow = None
+                    else:
+                        await self._advance_alarm_workflow()
+                elif command["command_type"] != "tracking.set_policy":
                     await self._reconcile_pending_policy()
+                    await self._advance_alarm_workflow()
         except asyncio.CancelledError:
             pass
 
@@ -445,6 +619,9 @@ class RemoteService:
     def capabilities(self) -> dict[str, Any]:
         online = self.is_online()
         disabled_reason = None if online else f"device_{self.connectivity_state()}"
+        vehicle = self.database.vehicle(self.vehicle_id)
+        confirm_lock_enabled = vehicle["lock_state"] == "locked"
+        acknowledge_enabled = vehicle["active_alarm_id"] is not None
         return {
             "vehicle.unlock": {"enabled": online, "reason": disabled_reason},
             "vehicle.lock": {
@@ -462,6 +639,16 @@ class RemoteService:
                 "enabled": online,
                 "reason": disabled_reason,
                 "allowed_policies": TRACKING_POLICIES,
+            },
+            "security.confirm_locked": {
+                "enabled": confirm_lock_enabled,
+                "reason": None if confirm_lock_enabled else "physical_lock_not_confirmed",
+                "grace_seconds": self.lock_grace_seconds,
+            },
+            "security.arm": {"enabled": True, "reason": None},
+            "alarm.acknowledge": {
+                "enabled": acknowledge_enabled,
+                "reason": None if acknowledge_enabled else "no_active_alarm",
             },
             "wheel_lock": {"enabled": False, "reason": "unsupported_hardware"},
         }
@@ -542,6 +729,14 @@ class RemoteService:
                 "latest": self.database.latest_location(self.vehicle_id, valid_only=True),
                 "last_report": self.database.latest_location(self.vehicle_id, valid_only=False),
                 "points": self.database.locations(self.vehicle_id, limit=limit, since=since),
+            }, 200
+        if request.method == "GET" and request.path == "/api/v1/alarms":
+            query = parse_qs(request.query, keep_blank_values=True)
+            active_only = query.get("state", [""])[0] == "active"
+            return {
+                "alarms": self.database.alarms(
+                    self.vehicle_id, active_only=active_only
+                )
             }, 200
         if request.method == "POST" and request.path == "/api/v1/ble-observations":
             self._verify_control_signature(request, client)
@@ -695,6 +890,7 @@ async def run_servers(service: RemoteService, tcp_host: str, tcp_port: int,
         raise
     LOGGER.info("IoT TCP listening on %s:%s", tcp_host, tcp_port)
     LOGGER.info("HTTP API listening on %s:%s", http_host, http_port)
+    await service.start_background_tasks()
     tasks = [
         asyncio.create_task(tcp_server.serve_forever()),
         asyncio.create_task(http_server.serve_forever()),

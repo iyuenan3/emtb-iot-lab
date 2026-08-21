@@ -238,6 +238,8 @@ Build 10 先实现精简的 `ble_observations` 表，用于同步 BLE 主锁只�
 
 `suspected_offline_movement` 必须满足：断网前存在可信停车位置、重连时仍确认关锁、两次重连定位均有效且通过漂移过滤。定位阈值由户外验收配置，告警详情必须展示“推断”标签和用于比较的位置时间。
 
+Build 12 已落地 `alarms`、`alarm_events`、`vehicle_state.grace_until`、`vehicle_state.active_alarm_id` 和 `locations.alarm_id`。等待期抑制、60 秒提醒窗口、活动告警合并、用户确认与授权开锁解除均在 SQLite 事务中处理。离线移动推断仍未接入。
+
 ### 6.2 `alarm_events`
 
 追加保存设备触发、等待期抑制、合并、立即定位、D1 切换、用户确认、授权开锁解除等事件。等待期内收到的 `W0` 只写 `alarm_events`，并标记 `suppressed_by_grace_period`。
