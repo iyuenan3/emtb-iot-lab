@@ -491,7 +491,7 @@ final class RemoteControlManager: ObservableObject {
 
     func poll() async {
         guard isPaired, !isBusy else { return }
-        do { try await loadRemoteData() } catch { }
+        do { try await loadOperationalData() } catch { }
         await flushPendingBLEEvents()
     }
 
@@ -680,38 +680,8 @@ final class RemoteControlManager: ObservableObject {
     }
 
     private func loadRemoteData() async throws {
-        let vehicleResponse = try await request(path: "/api/v1/vehicle")
-        let capabilityResponse = try await request(path: "/api/v1/capabilities")
-        let commandResponse = try await request(path: "/api/v1/commands")
-        guard let vehicleObject = vehicleResponse["vehicle"],
-              let capabilityObject = capabilityResponse["capabilities"],
-              let commandObject = commandResponse["commands"] else {
-            throw RemoteError.message("远程服务响应缺少必要字段")
-        }
+        try await loadOperationalData()
         let decoder = JSONDecoder()
-        vehicle = try decoder.decode(
-            RemoteVehicle.self,
-            from: JSONSerialization.data(withJSONObject: vehicleObject)
-        )
-        capabilities = try decoder.decode(
-            [String: RemoteCapability].self,
-            from: JSONSerialization.data(withJSONObject: capabilityObject)
-        )
-        commands = try decoder.decode(
-            [RemoteCommand].self,
-            from: JSONSerialization.data(withJSONObject: commandObject)
-        )
-        do {
-            let alarmResponse = try await request(path: "/api/v1/alarms")
-            if let alarmObject = alarmResponse["alarms"] {
-                let loaded = try decoder.decode(
-                    [RemoteAlarm].self,
-                    from: JSONSerialization.data(withJSONObject: alarmObject)
-                )
-                alarms = loaded
-                notifyForNewestActiveAlarm(loaded)
-            }
-        } catch { }
         do {
             let tripResponse = try await request(path: "/api/v1/trips?limit=100")
             if let tripObject = tripResponse["trips"] {
@@ -757,6 +727,41 @@ final class RemoteControlManager: ObservableObject {
                     [RemoteLocation].self,
                     from: JSONSerialization.data(withJSONObject: points)
                 )
+            }
+        } catch { }
+    }
+
+    private func loadOperationalData() async throws {
+        let vehicleResponse = try await request(path: "/api/v1/vehicle")
+        let capabilityResponse = try await request(path: "/api/v1/capabilities")
+        let commandResponse = try await request(path: "/api/v1/commands")
+        guard let vehicleObject = vehicleResponse["vehicle"],
+              let capabilityObject = capabilityResponse["capabilities"],
+              let commandObject = commandResponse["commands"] else {
+            throw RemoteError.message("远程服务响应缺少必要字段")
+        }
+        let decoder = JSONDecoder()
+        vehicle = try decoder.decode(
+            RemoteVehicle.self,
+            from: JSONSerialization.data(withJSONObject: vehicleObject)
+        )
+        capabilities = try decoder.decode(
+            [String: RemoteCapability].self,
+            from: JSONSerialization.data(withJSONObject: capabilityObject)
+        )
+        commands = try decoder.decode(
+            [RemoteCommand].self,
+            from: JSONSerialization.data(withJSONObject: commandObject)
+        )
+        do {
+            let alarmResponse = try await request(path: "/api/v1/alarms")
+            if let alarmObject = alarmResponse["alarms"] {
+                let loaded = try decoder.decode(
+                    [RemoteAlarm].self,
+                    from: JSONSerialization.data(withJSONObject: alarmObject)
+                )
+                alarms = loaded
+                notifyForNewestActiveAlarm(loaded)
             }
         } catch { }
     }

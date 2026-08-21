@@ -1171,7 +1171,12 @@ class RemoteService:
                 raise APIError(400, "invalid_audit_query", "审计查询参数无效")
             if not 1 <= limit <= 500:
                 raise APIError(400, "invalid_audit_query", "审计查询参数超出范围")
-            return {"audit_logs": self.database.audit_logs(limit)}, 200
+            audit_logs = self.database.audit_logs(limit)
+            self.database.write_audit(
+                client["id"], "audit.read", "audit_log", None, "succeeded",
+                detail={"limit": limit},
+            )
+            return {"audit_logs": audit_logs}, 200
         if request.method == "GET" and request.path == "/api/v1/device-sessions":
             query = parse_qs(request.query, keep_blank_values=True)
             try:
@@ -1180,7 +1185,12 @@ class RemoteService:
                 raise APIError(400, "invalid_session_query", "会话查询参数无效")
             if not 1 <= limit <= 100:
                 raise APIError(400, "invalid_session_query", "会话查询参数超出范围")
-            return {"device_sessions": self.device_sessions_payload(limit)}, 200
+            sessions = self.device_sessions_payload(limit)
+            self.database.write_audit(
+                client["id"], "device_session.read", "device_session", None,
+                "succeeded", detail={"limit": limit},
+            )
+            return {"device_sessions": sessions}, 200
         if request.method == "GET" and request.path == "/api/v1/locations":
             query = parse_qs(request.query, keep_blank_values=True)
             try:
@@ -1191,11 +1201,16 @@ class RemoteService:
                 raise APIError(400, "invalid_location_query", "定位查询参数无效")
             if not 1 <= limit <= 2000 or since is not None and since < 0:
                 raise APIError(400, "invalid_location_query", "定位查询参数超出范围")
-            return {
+            locations = {
                 "latest": self.database.latest_location(self.vehicle_id, valid_only=True),
                 "last_report": self.database.latest_location(self.vehicle_id, valid_only=False),
                 "points": self.database.locations(self.vehicle_id, limit=limit, since=since),
-            }, 200
+            }
+            self.database.write_audit(
+                client["id"], "location.history.read", "vehicle", self.vehicle_id,
+                "succeeded", detail={"limit": limit, "since": since},
+            )
+            return locations, 200
         if request.method == "GET" and request.path == "/api/v1/trips":
             query = parse_qs(request.query, keep_blank_values=True)
             try:
@@ -1214,9 +1229,14 @@ class RemoteService:
                 raise APIError(404, "trip_not_found", "骑行记录不存在")
             if trip["vehicle_id"] != self.vehicle_id:
                 raise APIError(404, "trip_not_found", "骑行记录不存在")
+            points = self.database.trip_locations(self.vehicle_id, trip_id)
+            self.database.write_audit(
+                client["id"], "trip.detail.read", "trip", trip_id, "succeeded",
+                detail={"point_count": len(points)},
+            )
             return {
                 "trip": trip,
-                "points": self.database.trip_locations(self.vehicle_id, trip_id),
+                "points": points,
             }, 200
         if request.method == "GET" and request.path == "/api/v1/alarms":
             query = parse_qs(request.query, keep_blank_values=True)

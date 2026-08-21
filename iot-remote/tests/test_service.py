@@ -842,7 +842,20 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         catalog = self.service.capabilities()
 
-        self.assertGreaterEqual(len(catalog), 30)
+        self.assertEqual(
+            set(catalog),
+            {
+                "vehicle.unlock", "vehicle.lock", "location.once",
+                "vehicle.find_sound", "iot.q0", "iot.h0", "telemetry.refresh",
+                "iot.g0", "iot.e0", "iot.i0", "iot.m0", "iot.z0",
+                "wheel_lock", "iot.s5", "tracking.set_policy", "iot.s7",
+                "iot.s4", "iot.w0", "iot.s1", "iot.k0", "iot.u0", "iot.u1",
+                "iot.u2", "internal.r0", "internal.auth", "internal.ack",
+                "internal.error", "security.confirm_locked", "security.arm",
+                "alarm.acknowledge", "archive.rfid", "archive.power",
+                "archive.logs", "archive.system_transfer", "archive.ota",
+            },
+        )
         self.assertEqual(catalog["vehicle.unlock"]["protocol"], "L0")
         self.assertEqual(
             catalog["vehicle.unlock"]["support_status"], "实车已验证"
@@ -891,6 +904,47 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertTrue(audit["audit_logs"])
         self.assertNotIn("token", str(audit["audit_logs"]))
+        actions = {item["action"] for item in self.database.audit_logs(20)}
+        self.assertIn("device_session.read", actions)
+        self.assertIn("audit.read", actions)
+
+    async def test_location_and_trip_detail_reads_are_audited_safely(self):
+        now = int(time.time())
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "unlocked", "test", now - 120
+        )
+        trip_id = self.database.vehicle(self.service.vehicle_id)["active_trip_id"]
+        self.database.save_location(
+            self.service.vehicle_id, source="tracking", device_timestamp=now - 60,
+            valid=True, latitude=30.0, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("sensitive-raw",),
+        )
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        code = self.database.create_pairing_code()
+        paired = self.database.complete_pairing(code, "iPhone", "secret-token", public)
+        headers = {
+            "x-client-id": paired["client_id"],
+            "authorization": "Bearer secret-token",
+        }
+
+        locations, status = await self.service.route(HTTPSpec(
+            "GET", "/api/v1/locations", "limit=25&since=1", headers, b"",
+        ))
+        self.assertEqual(status, 200)
+        self.assertEqual(len(locations["points"]), 1)
+        detail, status = await self.service.route(HTTPSpec(
+            "GET", f"/api/v1/trips/{trip_id}", "", headers, b"",
+        ))
+        self.assertEqual(status, 200)
+        self.assertEqual(len(detail["points"]), 1)
+
+        logs = self.database.audit_logs(20)
+        actions = {item["action"] for item in logs}
+        self.assertIn("location.history.read", actions)
+        self.assertIn("trip.detail.read", actions)
+        serialized = str(logs)
+        self.assertNotIn("secret-token", serialized)
+        self.assertNotIn("sensitive-raw", serialized)
 
     async def test_connectivity_transitions_disable_commands(self):
         clock = asyncio.get_running_loop().time()
