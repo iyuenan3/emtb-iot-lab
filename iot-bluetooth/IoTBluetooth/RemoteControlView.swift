@@ -65,6 +65,7 @@ struct RemoteControlView: View {
             }
             LabeledContent("电量", value: remote.vehicle?.batteryPercent.map { "\($0)%" } ?? "未读取")
             LabeledContent("布防", value: remote.vehicle?.securityState ?? "未读取")
+            LabeledContent("定位策略", value: trackingPolicyText)
             LabeledContent("最后通信", value: lastSeenText)
         }
     }
@@ -185,13 +186,23 @@ struct RemoteControlView: View {
             .formatted(date: .abbreviated, time: .standard)
     }
 
+    private var trackingPolicyText: String {
+        guard let desired = remote.vehicle?.desiredTrackingInterval else { return "未配置" }
+        guard remote.vehicle?.confirmedTrackingInterval == desired else {
+            let confirmed = remote.vehicle?.confirmedTrackingInterval.map { "\($0) 秒" } ?? "无"
+            return "目标 \(desired) 秒，设备确认 \(confirmed)"
+        }
+        return "已确认 \(desired) 秒"
+    }
+
     private func capability(_ name: String) -> Bool {
         remote.capabilities[name]?.enabled == true
     }
 
     private func commandName(_ value: String) -> String {
         ["vehicle.unlock": "开锁", "vehicle.lock": "关锁", "vehicle.find_sound": "声音找车",
-         "telemetry.refresh": "读取设备信息", "location.once": "单次定位"][value] ?? value
+         "telemetry.refresh": "读取设备信息", "location.once": "单次定位",
+         "tracking.set_policy": "定位策略"][value] ?? value
     }
 
     private func statusName(_ value: String) -> String {

@@ -183,6 +183,7 @@ private struct VehicleHomeView: View {
             MetricCard(title: "BLE", value: device.phase.rawValue)
             MetricCard(title: "车端电量", value: batteryText)
             MetricCard(title: "安全状态", value: securityText)
+            MetricCard(title: "定位策略", value: trackingPolicyText)
         }
     }
 
@@ -290,6 +291,14 @@ private struct VehicleHomeView: View {
         case "alerting": return "告警中"
         default: return "未读取"
         }
+    }
+
+    private var trackingPolicyText: String {
+        guard let desired = remote.vehicle?.desiredTrackingInterval else { return "未配置" }
+        guard remote.vehicle?.confirmedTrackingInterval == desired else {
+            return "目标 \(desired) 秒，未确认"
+        }
+        return "\(desired) 秒"
     }
 
     private var statusMessage: String { channel == .remote ? remote.message : device.operationMessage }
@@ -479,7 +488,8 @@ private struct ActivityView: View {
 
     private func commandName(_ value: String) -> String {
         ["vehicle.unlock": "远程开锁", "vehicle.lock": "远程关锁", "vehicle.find_sound": "声音找车",
-         "telemetry.refresh": "读取设备信息", "location.once": "单次定位"][value] ?? value
+         "telemetry.refresh": "读取设备信息", "location.once": "单次定位",
+         "tracking.set_policy": "定位策略"][value] ?? value
     }
 
     private func commandIcon(_ value: String) -> String {

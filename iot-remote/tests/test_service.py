@@ -70,8 +70,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             ("0", params["user_id"], params["timestamp"]),
         ))
         result = self.database.command(command["id"])
+        vehicle = self.database.vehicle(self.service.vehicle_id)
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(self.database.vehicle(self.service.vehicle_id)["lock_state"], "unlocked")
+        self.assertEqual(vehicle["lock_state"], "unlocked")
+        self.assertEqual(vehicle["desired_tracking_interval"], 60)
+        self.assertIn(b",D1,60#", self.writer.data)
 
     async def test_lock_requires_signed_stationary_confirmation(self):
         command = self.create("vehicle.lock")
@@ -110,6 +113,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["result"]["physical_confirmation_required"])
         self.assertEqual(vehicle["lock_state"], "locked")
         self.assertEqual(vehicle["security_state"], "disarmed")
+        self.assertEqual(vehicle["desired_tracking_interval"], 3600)
+        self.assertIn(b",D1,3600#", self.writer.data)
 
     async def test_already_locked_is_noop_without_sending(self):
         self.database.update_vehicle_state(self.service.vehicle_id, lock_state="locked")
@@ -156,6 +161,89 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vehicle["lock_state_source"], "iot_h0")
         self.assertEqual(vehicle["power_mv"], 412)
         self.assertEqual(vehicle["battery_percent"], 99)
+        self.assertEqual(vehicle["desired_tracking_interval"], 3600)
+        self.assertIn(b",D1,3600#", self.writer.data)
+
+    async def test_d1_keeps_desired_and_confirmed_values_separate(self):
+        command = self.create(
+            "tracking.set_policy", parameters={"interval_seconds": 60, "reason": "test"}
+        )
+        await self.service.dispatch_command(command["id"])
+        requested = self.database.vehicle(self.service.vehicle_id)
+        self.assertEqual(requested["desired_tracking_interval"], 60)
+        self.assertIsNone(requested["confirmed_tracking_interval"])
+        self.assertIn(b",D1,60#", self.writer.data)
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "S6",
+            ("99", "11264", "12", "24066", "0", "65535", "53780", "0"),
+        ))
+        self.assertEqual(
+            self.database.command(command["id"])["status"], "awaiting_result"
+        )
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "D1", ("60",)
+        ))
+        confirmed = self.database.vehicle(self.service.vehicle_id)
+        result = self.database.command(command["id"])
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["result"]["confirmed_tracking_interval"], 60)
+        self.assertEqual(confirmed["confirmed_tracking_interval"], 60)
+        self.assertIsNotNone(confirmed["tracking_confirmed_at"])
+
+    async def test_d1_timeout_is_not_retried_on_same_session(self):
+        self.database.update_vehicle_state(self.service.vehicle_id, lock_state="locked")
+        self.service.session.policy_reconciled = True
+        first = await self.service.reconcile_tracking_policy("test_timeout")
+        self.assertIsNotNone(first)
+        self.service._finish(first["id"], "unknown", "device_timeout")
+        sent = bytes(self.writer.data)
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("1", "412", "31", "99", "0")
+        ))
+        self.assertEqual(bytes(self.writer.data), sent)
+        self.assertEqual(
+            self.database.vehicle(self.service.vehicle_id)["desired_tracking_interval"], 3600
+        )
+        self.assertIsNone(
+            self.database.vehicle(self.service.vehicle_id)["confirmed_tracking_interval"]
+        )
+
+    async def test_new_session_h0_creates_new_policy_command_after_timeout(self):
+        self.database.update_vehicle_state(self.service.vehicle_id, lock_state="locked")
+        first = await self.service.reconcile_tracking_policy("first_session")
+        self.service._finish(first["id"], "unknown", "device_timeout")
+        first_id = first["id"]
+
+        self.service.session = DeviceSession(
+            FakeWriter(), "ZZ", asyncio.get_running_loop().time()
+        )
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("1", "412", "31", "99", "0")
+        ))
+        active = self.database.active_command(self.service.vehicle_id)
+        self.assertIsNotNone(active)
+        self.assertEqual(active["command_type"], "tracking.set_policy")
+        self.assertNotEqual(active["id"], first_id)
+
+    async def test_new_session_policy_waits_for_active_command(self):
+        find_sound = self.create("vehicle.find_sound")
+        await self.service.dispatch_command(find_sound["id"])
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("1", "412", "31", "99", "0")
+        ))
+        self.assertEqual(
+            self.database.active_command(self.service.vehicle_id)["id"], find_sound["id"]
+        )
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "V0", ("2",)
+        ))
+        active = self.database.active_command(self.service.vehicle_id)
+        self.assertEqual(active["command_type"], "tracking.set_policy")
+        self.assertIn(b",D1,3600#", self.writer.data)
 
     async def test_connectivity_transitions_disable_commands(self):
         clock = asyncio.get_running_loop().time()

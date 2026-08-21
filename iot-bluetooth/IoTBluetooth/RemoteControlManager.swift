@@ -16,6 +16,9 @@ struct RemoteVehicle: Decodable {
     let powerMv: Int?
     let batteryPercent: Int?
     let securityState: String
+    let desiredTrackingInterval: Int?
+    let confirmedTrackingInterval: Int?
+    let trackingConfirmedAt: Int?
     let telemetryFields: [String]?
     let telemetryUpdatedAt: Int?
 
@@ -30,6 +33,9 @@ struct RemoteVehicle: Decodable {
         case powerMv = "power_mv"
         case batteryPercent = "battery_percent"
         case securityState = "security_state"
+        case desiredTrackingInterval = "desired_tracking_interval"
+        case confirmedTrackingInterval = "confirmed_tracking_interval"
+        case trackingConfirmedAt = "tracking_confirmed_at"
         case telemetryFields = "telemetry_fields"
         case telemetryUpdatedAt = "telemetry_updated_at"
     }

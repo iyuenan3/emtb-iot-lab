@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS vehicle_state (
   battery_percent INTEGER, security_state TEXT NOT NULL DEFAULT 'unknown',
   active_unlock_user TEXT, active_unlock_timestamp TEXT, telemetry_fields_json TEXT,
   telemetry_updated_at INTEGER, lock_state_source TEXT NOT NULL DEFAULT 'unknown',
-  lock_state_updated_at INTEGER, updated_at INTEGER NOT NULL
+  lock_state_updated_at INTEGER, desired_tracking_interval INTEGER,
+  confirmed_tracking_interval INTEGER, tracking_confirmed_at INTEGER,
+  updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pairing_codes (
   digest TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used_at INTEGER
@@ -101,6 +103,18 @@ class Database:
             )
         if "lock_state_updated_at" not in columns:
             self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN lock_state_updated_at INTEGER")
+        if "desired_tracking_interval" not in columns:
+            self.connection.execute(
+                "ALTER TABLE vehicle_state ADD COLUMN desired_tracking_interval INTEGER"
+            )
+        if "confirmed_tracking_interval" not in columns:
+            self.connection.execute(
+                "ALTER TABLE vehicle_state ADD COLUMN confirmed_tracking_interval INTEGER"
+            )
+        if "tracking_confirmed_at" not in columns:
+            self.connection.execute(
+                "ALTER TABLE vehicle_state ADD COLUMN tracking_confirmed_at INTEGER"
+            )
 
     def _migrate_locations(self) -> None:
         columns = {
@@ -200,7 +214,8 @@ class Database:
             "online", "last_seen_at", "lock_state", "power_mv", "battery_percent",
             "security_state", "active_unlock_user", "active_unlock_timestamp",
             "telemetry_fields_json", "telemetry_updated_at", "lock_state_source",
-            "lock_state_updated_at",
+            "lock_state_updated_at", "desired_tracking_interval",
+            "confirmed_tracking_interval", "tracking_confirmed_at",
         }
         filtered = {key: value for key, value in values.items() if key in allowed}
         if not filtered:
@@ -416,7 +431,7 @@ class Database:
         ).fetchone()
         return int(row["created_at"]) if row else None
 
-    def create_command(self, vehicle_id: str, client_id: str, command_type: str,
+    def create_command(self, vehicle_id: str, client_id: Optional[str], command_type: str,
                        parameters: dict[str, Any], idempotency_key: Optional[str]) -> tuple[dict[str, Any], bool]:
         if idempotency_key:
             existing = self.connection.execute(

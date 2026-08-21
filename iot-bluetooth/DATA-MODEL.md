@@ -80,6 +80,8 @@
 
 只有设备明确回包才能更新 `lock_state` 和 `confirmed_tracking_interval`。发出命令只更新期望值，不提前修改确认值。
 
+Build 11 已在当前 `vehicle_state` 表落地 `desired_tracking_interval`、`confirmed_tracking_interval` 和 `tracking_confirmed_at`。旧数据库启动时原位补列，不伪造历史确认值。
+
 ### 3.3 `device_sessions`
 
 记录连接生命周期，不保存完整公网地址。

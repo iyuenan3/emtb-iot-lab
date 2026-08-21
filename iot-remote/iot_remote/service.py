@@ -17,11 +17,12 @@ from .protocol import Frame, build_downlink, parse_d0, parse_frame, split_frames
 
 LOGGER = logging.getLogger("iot_remote")
 TERMINAL = {"succeeded", "failed", "unknown", "noop", "rejected"}
-SIGNED_COMMANDS = {"vehicle.unlock", "vehicle.lock"}
+SIGNED_COMMANDS = {"vehicle.unlock", "vehicle.lock", "tracking.set_policy"}
 SUPPORTED_COMMANDS = {
     "vehicle.unlock", "vehicle.lock", "vehicle.find_sound",
-    "telemetry.refresh", "location.once",
+    "telemetry.refresh", "location.once", "tracking.set_policy",
 }
+TRACKING_POLICIES = {"unlocked": 60, "locked": 3600, "alarm": 300}
 
 
 class APIError(Exception):
@@ -46,6 +47,7 @@ class DeviceSession:
     writer: asyncio.StreamWriter
     vendor: str
     last_frame_at: float
+    policy_reconciled: bool = False
 
 
 class RemoteService:
@@ -74,6 +76,7 @@ class RemoteService:
         self._session_lock = asyncio.Lock()
         self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._pairing_failures: list[float] = []
+        self._policy_reconcile_pending = False
         self.database.mark_inflight_unknown()
 
     def is_online(self) -> bool:
@@ -141,6 +144,7 @@ class RemoteService:
             async with self._session_lock:
                 if self.session and self.session.writer is writer:
                     self.session = None
+                    self._policy_reconcile_pending = False
                     self.database.update_vehicle_state(self.vehicle_id, online=0)
                     active = self.database.active_command(self.vehicle_id)
                     if active:
@@ -151,8 +155,13 @@ class RemoteService:
 
     async def _accept_session(self, writer: asyncio.StreamWriter, frame: Frame) -> None:
         async with self._session_lock:
+            if self.session and self.session.writer is writer:
+                self.session.vendor = frame.vendor
+                self.session.last_frame_at = time.monotonic()
+                return
             if self.session and self.session.writer is not writer:
                 self.session.writer.close()
+            self._policy_reconcile_pending = False
             self.session = DeviceSession(writer, frame.vendor, time.monotonic())
             self.database.update_vehicle_state(
                 self.vehicle_id, online=1, last_seen_at=int(time.time())
@@ -162,6 +171,7 @@ class RemoteService:
         if self.session:
             self.session.last_frame_at = time.monotonic()
         fields = tuple(field.strip() for field in frame.fields)
+        reconcile_new_session = False
         location_report = None
         stored_location = None
         if frame.function == "H0" and len(fields) >= 4:
@@ -176,6 +186,10 @@ class RemoteService:
             if fields[3].isdigit():
                 updates["battery_percent"] = int(fields[3])
             self.database.update_vehicle_state(self.vehicle_id, **updates)
+            if self.session and not self.session.policy_reconciled:
+                self.session.policy_reconciled = True
+                reconcile_new_session = True
+                self._policy_reconcile_pending = True
         elif frame.function == "S6" and fields and fields[0].isdigit():
             self.database.update_vehicle_state(
                 self.vehicle_id,
@@ -205,6 +219,8 @@ class RemoteService:
 
         active = self.database.active_command(self.vehicle_id)
         if active is None:
+            if reconcile_new_session:
+                await self._reconcile_pending_policy()
             return
         status = active["status"]
         command_type = active["command_type"]
@@ -245,10 +261,27 @@ class RemoteService:
             verified = location_report is not None and location_report.source == "once"
         elif command_type == "vehicle.lock" and frame.function == "L1":
             verified = len(fields) >= 1 and fields[0] == "0"
+        elif command_type == "tracking.set_policy" and frame.function == "D1":
+            expected = parameters.get("interval_seconds")
+            verified = len(fields) == 1 and fields[0].isdigit() and int(fields[0]) == expected
 
         if not verified:
-            if frame.function in {"L0", "L1", "V0", "S6", "D0"}:
+            expected_function = {
+                "vehicle.unlock": "L0",
+                "vehicle.lock": "L1",
+                "vehicle.find_sound": "V0",
+                "telemetry.refresh": "S6",
+                "location.once": "D0",
+                "tracking.set_policy": "D1",
+            }.get(command_type)
+            scheduled_location = (
+                command_type == "location.once" and location_report is not None
+                and location_report.source == "tracking"
+            )
+            if frame.function == expected_function and not scheduled_location:
                 self._finish(active["id"], "failed", "invalid_device_response")
+                if command_type != "tracking.set_policy":
+                    await self._reconcile_pending_policy()
             return
         if frame.function in {"L0", "L1"}:
             await self._send(frame.function, [])
@@ -264,6 +297,12 @@ class RemoteService:
                 self.vehicle_id, lock_state="locked", security_state="disarmed",
                 lock_state_source="remote_command", lock_state_updated_at=int(time.time()),
             )
+        elif command_type == "tracking.set_policy":
+            self.database.update_vehicle_state(
+                self.vehicle_id,
+                confirmed_tracking_interval=parameters["interval_seconds"],
+                tracking_confirmed_at=int(time.time()),
+            )
         detail = {"function": frame.function}
         if command_type == "vehicle.lock":
             detail["physical_confirmation_required"] = True
@@ -272,7 +311,49 @@ class RemoteService:
             detail["location_valid"] = stored_location["valid"]
             detail["location_display_eligible"] = stored_location["display_eligible"]
             detail["location_rejection_reason"] = stored_location["rejection_reason"]
+        elif command_type == "tracking.set_policy":
+            detail["confirmed_tracking_interval"] = parameters["interval_seconds"]
         self._finish(active["id"], "succeeded", None, detail)
+        if command_type in {"vehicle.unlock", "vehicle.lock"}:
+            self._policy_reconcile_pending = False
+            await self.reconcile_tracking_policy("lock_state_changed")
+        elif command_type != "tracking.set_policy":
+            await self._reconcile_pending_policy()
+
+    def desired_tracking_interval(self) -> Optional[int]:
+        vehicle = self.database.vehicle(self.vehicle_id)
+        if vehicle["security_state"] == "alarm_active":
+            return TRACKING_POLICIES["alarm"]
+        if vehicle["lock_state"] == "unlocked":
+            return TRACKING_POLICIES["unlocked"]
+        if vehicle["lock_state"] == "locked":
+            return TRACKING_POLICIES["locked"]
+        return None
+
+    async def reconcile_tracking_policy(self, reason: str) -> Optional[dict[str, Any]]:
+        interval = self.desired_tracking_interval()
+        if interval is None:
+            return None
+        self.database.update_vehicle_state(
+            self.vehicle_id, desired_tracking_interval=interval
+        )
+        vehicle = self.database.vehicle(self.vehicle_id)
+        if vehicle["confirmed_tracking_interval"] == interval:
+            return None
+        if not self.is_online() or self.database.active_command(self.vehicle_id):
+            return None
+        command, _ = self.database.create_command(
+            self.vehicle_id, None, "tracking.set_policy",
+            {"interval_seconds": interval, "reason": reason}, None,
+        )
+        await self.dispatch_command(command["id"])
+        return self.database.command(command["id"])
+
+    async def _reconcile_pending_policy(self) -> None:
+        if not self._policy_reconcile_pending:
+            return
+        self._policy_reconcile_pending = False
+        await self.reconcile_tracking_policy("session_h0")
 
     async def _send(self, function: str, fields: list[str]) -> None:
         if not self.is_online() or self.session is None:
@@ -302,6 +383,17 @@ class RemoteService:
         if command_type == "vehicle.lock" and command["parameters"].get("stationary_confirmed") is not True:
             self._finish(command_id, "rejected", "stationary_confirmation_required")
             return
+        if command_type == "tracking.set_policy":
+            interval = command["parameters"].get("interval_seconds")
+            if interval not in TRACKING_POLICIES.values():
+                self._finish(command_id, "rejected", "invalid_tracking_policy")
+                return
+            self.database.update_vehicle_state(
+                self.vehicle_id, desired_tracking_interval=interval
+            )
+            if vehicle["confirmed_tracking_interval"] == interval:
+                self._finish(command_id, "noop", None, {"reason": "already_confirmed"})
+                return
         try:
             if command_type in {"vehicle.unlock", "vehicle.lock"}:
                 timestamp = str(int(time.time()))
@@ -316,11 +408,15 @@ class RemoteService:
                 await self._send("R0", [operation, "30", user_id, timestamp])
                 self.database.transition_command(command_id, "awaiting_r0")
             else:
-                function, fields = {
-                    "vehicle.find_sound": ("V0", ["2"]),
-                    "telemetry.refresh": ("S6", []),
-                    "location.once": ("D0", []),
-                }[command_type]
+                if command_type == "tracking.set_policy":
+                    function = "D1"
+                    fields = [str(command["parameters"]["interval_seconds"])]
+                else:
+                    function, fields = {
+                        "vehicle.find_sound": ("V0", ["2"]),
+                        "telemetry.refresh": ("S6", []),
+                        "location.once": ("D0", []),
+                    }[command_type]
                 await self._send(function, fields)
                 self.database.transition_command(command_id, "awaiting_result")
         except (ConnectionError, KeyError):
@@ -334,6 +430,8 @@ class RemoteService:
             command = self.database.command(command_id)
             if command["status"] not in TERMINAL:
                 self._finish(command_id, "unknown", "device_timeout")
+                if command["command_type"] != "tracking.set_policy":
+                    await self._reconcile_pending_policy()
         except asyncio.CancelledError:
             pass
 
@@ -360,6 +458,11 @@ class RemoteService:
             },
             "telemetry.refresh": {"enabled": online, "reason": disabled_reason},
             "location.once": {"enabled": online, "reason": disabled_reason},
+            "tracking.set_policy": {
+                "enabled": online,
+                "reason": disabled_reason,
+                "allowed_policies": TRACKING_POLICIES,
+            },
             "wheel_lock": {"enabled": False, "reason": "unsupported_hardware"},
         }
 
@@ -474,6 +577,16 @@ class RemoteService:
                 raise APIError(422, "unsupported_command", "不支持该指令")
             if command_type in SIGNED_COMMANDS:
                 self._verify_control_signature(request, client)
+            parameters = body.get("parameters") if isinstance(body.get("parameters"), dict) else {}
+            if command_type == "tracking.set_policy":
+                policy = parameters.get("policy")
+                if policy not in TRACKING_POLICIES:
+                    raise APIError(422, "invalid_tracking_policy", "定位策略无效")
+                parameters = {
+                    "policy": policy,
+                    "interval_seconds": TRACKING_POLICIES[policy],
+                    "reason": "manual_policy",
+                }
             active = self.database.active_command(self.vehicle_id)
             idem = request.headers.get("idempotency-key")
             if idem:
@@ -488,7 +601,7 @@ class RemoteService:
                     raise APIError(409, "sound_cooldown", "找车声音冷却中")
             command, created = self.database.create_command(
                 self.vehicle_id, client["id"], command_type,
-                body.get("parameters") if isinstance(body.get("parameters"), dict) else {},
+                parameters,
                 idem,
             )
             if created:
