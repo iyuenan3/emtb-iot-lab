@@ -121,6 +121,26 @@ CREATE TABLE IF NOT EXISTS cleanup_events (
   history_days INTEGER NOT NULL, deleted_trips INTEGER NOT NULL,
   deleted_locations INTEGER NOT NULL, created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS device_sessions (
+  id TEXT PRIMARY KEY, vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  peer_fingerprint TEXT NOT NULL, connected_at INTEGER NOT NULL,
+  disconnected_at INTEGER, disconnect_reason TEXT,
+  rx_count INTEGER NOT NULL DEFAULT 0, tx_count INTEGER NOT NULL DEFAULT 0,
+  parse_error_count INTEGER NOT NULL DEFAULT 0,
+  last_rx_at INTEGER, last_tx_at INTEGER, last_q0_at INTEGER, last_h0_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS device_sessions_active_vehicle
+  ON device_sessions(vehicle_id) WHERE disconnected_at IS NULL;
+CREATE INDEX IF NOT EXISTS device_sessions_vehicle_time
+  ON device_sessions(vehicle_id, connected_at DESC);
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor TEXT NOT NULL, action TEXT NOT NULL,
+  object_type TEXT NOT NULL, object_id TEXT,
+  result TEXT NOT NULL, request_id TEXT,
+  detail_json TEXT NOT NULL, created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS audit_logs_time ON audit_logs(created_at DESC, id DESC);
 """
 
 
@@ -281,7 +301,126 @@ class Database:
             self.connection.execute(
                 "UPDATE pairing_codes SET used_at=? WHERE digest=?", (now, digest)
             )
+            self._insert_audit(
+                client_id, "pairing.complete", "client", client_id,
+                "succeeded", client_id, {"permissions": permissions}, now,
+            )
         return {"client_id": client_id, "permissions": permissions}
+
+    def open_device_session(self, vehicle_id: str, peer_fingerprint: str,
+                            now: Optional[int] = None) -> dict[str, Any]:
+        current_time = int(time.time()) if now is None else now
+        session_id = str(uuid.uuid4())
+        with self.connection:
+            replaced = self.connection.execute(
+                "SELECT id FROM device_sessions WHERE vehicle_id=? "
+                "AND disconnected_at IS NULL",
+                (vehicle_id,),
+            ).fetchall()
+            for row in replaced:
+                self.connection.execute(
+                    "UPDATE device_sessions SET disconnected_at=?,disconnect_reason='replaced' "
+                    "WHERE id=?",
+                    (current_time, row["id"]),
+                )
+                self._insert_audit(
+                    "iot_device", "device_session.closed", "device_session", row["id"],
+                    "replaced", row["id"], {}, current_time,
+                )
+            self.connection.execute(
+                "INSERT INTO device_sessions(id,vehicle_id,peer_fingerprint,connected_at) "
+                "VALUES(?,?,?,?)",
+                (session_id, vehicle_id, peer_fingerprint, current_time),
+            )
+            self._insert_audit(
+                "iot_device", "device_session.connected", "device_session", session_id,
+                "succeeded", session_id, {"peer_fingerprint": peer_fingerprint}, current_time,
+            )
+        return self.device_session(session_id)
+
+    def record_device_rx(self, session_id: str, function: str,
+                         now: Optional[int] = None) -> None:
+        current_time = int(time.time()) if now is None else now
+        q0_at = current_time if function == "Q0" else None
+        h0_at = current_time if function == "H0" else None
+        with self.connection:
+            self.connection.execute(
+                "UPDATE device_sessions SET rx_count=rx_count+1,last_rx_at=?,"
+                "last_q0_at=COALESCE(?,last_q0_at),last_h0_at=COALESCE(?,last_h0_at) "
+                "WHERE id=? AND disconnected_at IS NULL",
+                (current_time, q0_at, h0_at, session_id),
+            )
+
+    def record_device_tx(self, session_id: str,
+                         now: Optional[int] = None) -> None:
+        current_time = int(time.time()) if now is None else now
+        with self.connection:
+            self.connection.execute(
+                "UPDATE device_sessions SET tx_count=tx_count+1,last_tx_at=? "
+                "WHERE id=? AND disconnected_at IS NULL",
+                (current_time, session_id),
+            )
+
+    def record_device_parse_error(self, session_id: str) -> None:
+        with self.connection:
+            self.connection.execute(
+                "UPDATE device_sessions SET parse_error_count=parse_error_count+1 "
+                "WHERE id=? AND disconnected_at IS NULL",
+                (session_id,),
+            )
+
+    def close_device_session(self, session_id: str, reason: str,
+                             now: Optional[int] = None) -> None:
+        current_time = int(time.time()) if now is None else now
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE device_sessions SET disconnected_at=?,disconnect_reason=? "
+                "WHERE id=? AND disconnected_at IS NULL",
+                (current_time, reason, session_id),
+            )
+            if cursor.rowcount:
+                self._insert_audit(
+                    "iot_device", "device_session.closed", "device_session", session_id,
+                    reason, session_id, {}, current_time,
+                )
+
+    def close_active_device_sessions(self, vehicle_id: str, reason: str,
+                                     now: Optional[int] = None) -> int:
+        current_time = int(time.time()) if now is None else now
+        with self.connection:
+            rows = self.connection.execute(
+                "SELECT id FROM device_sessions WHERE vehicle_id=? "
+                "AND disconnected_at IS NULL",
+                (vehicle_id,),
+            ).fetchall()
+            for row in rows:
+                self.connection.execute(
+                    "UPDATE device_sessions SET disconnected_at=?,disconnect_reason=? "
+                    "WHERE id=?",
+                    (current_time, reason, row["id"]),
+                )
+                self._insert_audit(
+                    "system", "device_session.closed", "device_session", row["id"],
+                    reason, row["id"], {}, current_time,
+                )
+        return len(rows)
+
+    def device_session(self, session_id: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM device_sessions WHERE id=?", (session_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(session_id)
+        return dict(row)
+
+    def device_sessions(self, vehicle_id: str,
+                        limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM device_sessions WHERE vehicle_id=? "
+            "ORDER BY connected_at DESC LIMIT ?",
+            (vehicle_id, max(1, min(limit, 100))),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def authenticate(self, client_id: str, read_token: str) -> Optional[sqlite3.Row]:
         row = self.connection.execute(
@@ -476,6 +615,11 @@ class Database:
                 (trip_id, vehicle_id, started_at, command_id,
                  int(recovered_after_restart), started_at),
             )
+            self._insert_audit(
+                "system", "trip.started", "trip", trip_id, "active",
+                command_id or trip_id,
+                {"recovered_after_restart": recovered_after_restart}, started_at,
+            )
         self.connection.execute(
             "UPDATE vehicle_state SET active_trip_id=?,updated_at=? WHERE vehicle_id=?",
             (trip_id, started_at, vehicle_id),
@@ -496,6 +640,10 @@ class Database:
             "UPDATE trips SET ended_at=?,end_command_id=?,status='completed',updated_at=? "
             "WHERE id=? AND status='active'",
             (ended_at, command_id, ended_at, trip_id),
+        )
+        self._insert_audit(
+            "system", "trip.completed", "trip", trip_id, "completed",
+            command_id or trip_id, {}, ended_at,
         )
         self.connection.execute(
             "UPDATE vehicle_state SET active_trip_id=NULL,updated_at=? WHERE vehicle_id=?",
@@ -842,7 +990,9 @@ class Database:
 
     def set_location_history_days(self, vehicle_id: str, days: int,
                                   confirm_shorten: bool = False,
-                                  now: Optional[int] = None) -> dict[str, Any]:
+                                  now: Optional[int] = None,
+                                  actor: str = "system",
+                                  request_id: Optional[str] = None) -> dict[str, Any]:
         if days not in {7, 30}:
             raise ValueError("轨迹保留天数无效")
         current_time = int(time.time()) if now is None else now
@@ -856,12 +1006,22 @@ class Database:
                     "WHERE vehicle_id=?",
                     (current_time, vehicle_id),
                 )
+                self._insert_audit(
+                    actor, "settings.location_history.updated", "vehicle", vehicle_id,
+                    "pending", request_id,
+                    {"days": days, "confirm_shorten": True}, current_time,
+                )
         else:
             with self.connection:
                 self.connection.execute(
                     "UPDATE settings SET location_history_days=?,"
                     "pending_location_history_days=NULL,updated_at=? WHERE vehicle_id=?",
                     (days, current_time, vehicle_id),
+                )
+                self._insert_audit(
+                    actor, "settings.location_history.updated", "vehicle", vehicle_id,
+                    "succeeded", request_id,
+                    {"days": days, "confirm_shorten": confirm_shorten}, current_time,
                 )
         return self.settings(vehicle_id)
 
@@ -922,10 +1082,98 @@ class Database:
                 (vehicle_id, history_days, deleted_trips,
                  deleted_locations, current_time),
             )
+            thirty_day_cutoff = current_time - 30 * 86400
+            seven_day_cutoff = current_time - 7 * 86400
+            deleted_ble_events = self.connection.execute(
+                "DELETE FROM ble_events WHERE vehicle_id=? AND received_at<?",
+                (vehicle_id, thirty_day_cutoff),
+            ).rowcount
+            deleted_ble_observations = self.connection.execute(
+                "DELETE FROM ble_observations WHERE vehicle_id=? AND received_at<?",
+                (vehicle_id, thirty_day_cutoff),
+            ).rowcount
+            terminal_command_ids = [
+                row["id"] for row in self.connection.execute(
+                    "SELECT id FROM commands WHERE vehicle_id=? AND status IN "
+                    "('succeeded','failed','unknown','noop','rejected') "
+                    "AND completed_at IS NOT NULL AND completed_at<?",
+                    (vehicle_id, thirty_day_cutoff),
+                ).fetchall()
+            ]
+            deleted_commands = 0
+            if terminal_command_ids:
+                placeholders = ",".join("?" for _ in terminal_command_ids)
+                self.connection.execute(
+                    f"DELETE FROM command_events WHERE command_id IN ({placeholders})",
+                    terminal_command_ids,
+                )
+                deleted_commands = self.connection.execute(
+                    f"DELETE FROM commands WHERE id IN ({placeholders})",
+                    terminal_command_ids,
+                ).rowcount
+            ended_alarm_ids = [
+                row["id"] for row in self.connection.execute(
+                    "SELECT id FROM alarms WHERE vehicle_id=? AND state!='active' "
+                    "AND COALESCE(cleared_at,acknowledged_at,last_triggered_at)<?",
+                    (vehicle_id, thirty_day_cutoff),
+                ).fetchall()
+            ]
+            deleted_alarms = 0
+            if ended_alarm_ids:
+                placeholders = ",".join("?" for _ in ended_alarm_ids)
+                self.connection.execute(
+                    f"DELETE FROM alarm_events WHERE alarm_id IN ({placeholders})",
+                    ended_alarm_ids,
+                )
+                deleted_alarms = self.connection.execute(
+                    f"DELETE FROM alarms WHERE id IN ({placeholders})",
+                    ended_alarm_ids,
+                ).rowcount
+            deleted_alarm_events = self.connection.execute(
+                "DELETE FROM alarm_events WHERE vehicle_id=? AND created_at<?",
+                (vehicle_id, thirty_day_cutoff),
+            ).rowcount
+            deleted_sessions = self.connection.execute(
+                "DELETE FROM device_sessions WHERE vehicle_id=? AND disconnected_at IS NOT NULL "
+                "AND disconnected_at<?",
+                (vehicle_id, seven_day_cutoff),
+            ).rowcount
+            deleted_cleanup_events = self.connection.execute(
+                "DELETE FROM cleanup_events WHERE vehicle_id=? AND created_at<?",
+                (vehicle_id, thirty_day_cutoff),
+            ).rowcount
+            deleted_audits = self.connection.execute(
+                "DELETE FROM audit_logs WHERE created_at<?", (thirty_day_cutoff,)
+            ).rowcount
+            self._insert_audit(
+                "system", "retention.cleanup", "vehicle", vehicle_id, "succeeded",
+                str(uuid.uuid4()),
+                {
+                    "history_days": history_days,
+                    "deleted_trips": deleted_trips,
+                    "deleted_locations": deleted_locations,
+                    "deleted_ble_events": deleted_ble_events,
+                    "deleted_ble_observations": deleted_ble_observations,
+                    "deleted_commands": deleted_commands,
+                    "deleted_alarms": deleted_alarms,
+                    "deleted_alarm_events": deleted_alarm_events,
+                    "deleted_sessions": deleted_sessions,
+                    "deleted_cleanup_events": deleted_cleanup_events,
+                    "deleted_audits": deleted_audits,
+                },
+                current_time,
+            )
         return {
             "history_days": history_days,
             "deleted_trips": deleted_trips,
             "deleted_locations": deleted_locations,
+            "deleted_ble_events": deleted_ble_events,
+            "deleted_ble_observations": deleted_ble_observations,
+            "deleted_commands": deleted_commands,
+            "deleted_alarms": deleted_alarms,
+            "deleted_alarm_events": deleted_alarm_events,
+            "deleted_sessions": deleted_sessions,
+            "deleted_audits": deleted_audits,
         }
 
     def cleanup_events(self, vehicle_id: str,
@@ -936,6 +1184,58 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def write_audit(self, actor: str, action: str, object_type: str,
+                    object_id: Optional[str], result: str,
+                    request_id: Optional[str] = None,
+                    detail: Optional[dict[str, Any]] = None,
+                    now: Optional[int] = None) -> dict[str, Any]:
+        current_time = int(time.time()) if now is None else now
+        with self.connection:
+            audit_id = self._insert_audit(
+                actor, action, object_type, object_id, result,
+                request_id, detail or {}, current_time,
+            )
+        return self.audit_log(audit_id)
+
+    def _insert_audit(self, actor: str, action: str, object_type: str,
+                      object_id: Optional[str], result: str,
+                      request_id: Optional[str], detail: dict[str, Any],
+                      created_at: int) -> int:
+        cursor = self.connection.execute(
+            "INSERT INTO audit_logs(actor,action,object_type,object_id,result,request_id,"
+            "detail_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                actor, action, object_type, object_id, result, request_id,
+                json.dumps(detail, separators=(",", ":"), ensure_ascii=False), created_at,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def audit_log(self, audit_id: int) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM audit_logs WHERE id=?", (audit_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(audit_id)
+        return self._audit_dict(row)
+
+    def audit_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM audit_logs ORDER BY created_at DESC,id DESC LIMIT ?",
+            (max(1, min(limit, 500)),),
+        ).fetchall()
+        return [self._audit_dict(row) for row in rows]
+
+    @staticmethod
+    def _audit_dict(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        detail = json.loads(result.pop("detail_json"))
+        result["detail"] = detail
+        result["detail_summary"] = json.dumps(
+            detail, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ) if detail else ""
+        return result
+
     def _insert_alarm_event(self, vehicle_id: str, alarm_id: Optional[str],
                             event_type: str, detail: dict[str, Any],
                             created_at: int) -> None:
@@ -944,6 +1244,11 @@ class Database:
             "VALUES(?,?,?,?,?)",
             (vehicle_id, alarm_id, event_type,
              json.dumps(detail, separators=(",", ":")), created_at),
+        )
+        self._insert_audit(
+            "iot_device" if event_type.startswith("movement_") else "system",
+            f"alarm.{event_type}", "alarm", alarm_id or vehicle_id,
+            "recorded", alarm_id or vehicle_id, detail, created_at,
         )
 
     def vehicle(self, vehicle_id: str) -> dict[str, Any]:
@@ -989,6 +1294,11 @@ class Database:
                     "lock_state_updated_at=?,updated_at=? WHERE vehicle_id=?",
                     (lock_state, observed_at, received_at, vehicle_id),
                 )
+            self._insert_audit(
+                client_id, "ble_observation.received", "ble_observation", observation_id,
+                "applied" if applied else "ignored", observation_id,
+                {"lock_state": lock_state}, received_at,
+            )
         row = self.connection.execute(
             "SELECT * FROM ble_observations WHERE id=?", (observation_id,)
         ).fetchone()
@@ -1039,6 +1349,17 @@ class Database:
                 self._apply_confirmed_lock_state(
                     vehicle_id, readback_lock_state, "ble_event", device_operation_at
                 )
+            self._insert_audit(
+                client_id, "ble_event.received", "ble_event", event_id,
+                "applied" if applied else "ignored", event_id,
+                {
+                    "action": action,
+                    "ble_result": ble_result,
+                    "readback_lock_state": readback_lock_state,
+                    "ignored_reason": ignored_reason,
+                },
+                received_at,
+            )
         row = self.connection.execute(
             "SELECT * FROM ble_events WHERE id=?", (event_id,)
         ).fetchone()
@@ -1119,6 +1440,14 @@ class Database:
                     "UPDATE trips SET point_count=point_count+1,distance_m=distance_m+?,"
                     "updated_at=? WHERE id=? AND status='active'",
                     (trip_distance, received_at, trip_id),
+                )
+            if cursor.rowcount:
+                location_id = str(cursor.lastrowid)
+                self._insert_audit(
+                    "iot_device", "location.received", "location", location_id,
+                    "accepted" if eligible else "filtered", location_id,
+                    {"source": source, "rejection_reason": reason, "trip_id": trip_id},
+                    received_at,
                 )
         row = self.connection.execute(
             "SELECT * FROM locations WHERE vehicle_id=? AND fingerprint=?",
@@ -1253,6 +1582,10 @@ class Database:
                 "INSERT INTO command_events(command_id,status,detail_json,created_at) VALUES(?,?,?,?)",
                 (command_id, "accepted", "{}", now),
             )
+            self._insert_audit(
+                client_id or "system", "command.created", "command", command_id,
+                "accepted", command_id, {"command_type": command_type}, now,
+            )
         return self.command(command_id), True
 
     def transition_command(self, command_id: str, status: str,
@@ -1272,6 +1605,19 @@ class Database:
             self.connection.execute(
                 "INSERT INTO command_events(command_id,status,detail_json,created_at) VALUES(?,?,?,?)",
                 (command_id, status, json.dumps(detail or {}, separators=(",", ":")), now),
+            )
+            command = self.connection.execute(
+                "SELECT client_id,command_type FROM commands WHERE id=?", (command_id,)
+            ).fetchone()
+            self._insert_audit(
+                (command["client_id"] if command and command["client_id"] else "system"),
+                "command.status", "command", command_id, status, command_id,
+                {
+                    "command_type": command["command_type"] if command else "unknown",
+                    "error_code": error_code,
+                    "detail": detail or {},
+                },
+                now,
             )
         return self.command(command_id)
 
@@ -1304,6 +1650,15 @@ class Database:
             "SELECT * FROM commands ORDER BY created_at DESC LIMIT ?", (max(1, min(limit, 100)),)
         ).fetchall()
         return [self._command_dict(row) for row in rows]
+
+    def latest_command(self, vehicle_id: str,
+                       command_type: str) -> Optional[dict[str, Any]]:
+        row = self.connection.execute(
+            "SELECT * FROM commands WHERE vehicle_id=? AND command_type=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (vehicle_id, command_type),
+        ).fetchone()
+        return self._command_dict(row) if row else None
 
     @staticmethod
     def _command_dict(row: sqlite3.Row) -> dict[str, Any]:

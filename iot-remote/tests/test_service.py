@@ -744,6 +744,69 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             shortened["settings"]["pending_location_history_days"], 7
         )
+        self.assertEqual(settings["settings"]["silence_window_seconds"], 420)
+        self.assertEqual(settings["settings"]["offline_window_seconds"], 720)
+        self.assertEqual(
+            settings["settings"]["mutable_fields"], ["location_history_days"]
+        )
+
+    async def test_capability_catalog_is_static_and_maintenance_stays_disabled(self):
+        command = self.create("vehicle.find_sound")
+        self.database.transition_command(
+            command["id"], "succeeded", {"function": "V0"}
+        )
+
+        catalog = self.service.capabilities()
+
+        self.assertGreaterEqual(len(catalog), 30)
+        self.assertEqual(catalog["vehicle.unlock"]["protocol"], "L0")
+        self.assertEqual(
+            catalog["vehicle.unlock"]["support_status"], "实车已验证"
+        )
+        self.assertEqual(
+            catalog["vehicle.find_sound"]["latest_result"]["status"], "succeeded"
+        )
+        self.assertEqual(
+            catalog["vehicle.find_sound"]["latest_result"]["raw_response_summary"],
+            '{"function":"V0"}',
+        )
+        self.assertFalse(catalog["wheel_lock"]["enabled"])
+        self.assertFalse(catalog["wheel_lock"]["executable"])
+        self.assertEqual(catalog["wheel_lock"]["support_status"], "不适用")
+        self.assertFalse(catalog["iot.k0"]["enabled"])
+        self.assertEqual(catalog["iot.k0"]["support_status"], "危险维护")
+
+    async def test_audit_and_device_session_apis_return_only_digest(self):
+        stored = self.database.open_device_session(
+            self.service.vehicle_id, "0123456789abcdef"
+        )
+        self.service.session.session_id = stored["id"]
+        self.database.record_device_rx(stored["id"], "H0")
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        code = self.database.create_pairing_code()
+        paired = self.database.complete_pairing(code, "iPhone", "token", public)
+        headers = {
+            "x-client-id": paired["client_id"],
+            "authorization": "Bearer token",
+        }
+
+        sessions, status = await self.service.route(HTTPSpec(
+            "GET", "/api/v1/device-sessions", "limit=10", headers, b"",
+        ))
+        self.assertEqual(status, 200)
+        current = sessions["device_sessions"][0]
+        self.assertTrue(current["current"])
+        self.assertEqual(current["peer_fingerprint"], "0123456789abcdef")
+        self.assertNotIn("peer_address", current)
+        self.assertEqual(current["rx_count"], 1)
+        self.assertIsNotNone(current["last_h0_at"])
+
+        audit, status = await self.service.route(HTTPSpec(
+            "GET", "/api/v1/audit-logs", "limit=20", headers, b"",
+        ))
+        self.assertEqual(status, 200)
+        self.assertTrue(audit["audit_logs"])
+        self.assertNotIn("token", str(audit["audit_logs"]))
 
     async def test_connectivity_transitions_disable_commands(self):
         clock = asyncio.get_running_loop().time()

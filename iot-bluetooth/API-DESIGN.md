@@ -98,6 +98,8 @@ METHOD\nPATH\nCANONICAL_QUERY\nTIMESTAMP\nNONCE\nBODY_SHA256
 | `GET /commands` | 查询命令历史 | 类型、状态、时间和操作者 |
 | `GET /capabilities` | 指令中心目录 | 通道、风险、验证级别、可执行性 |
 | `GET /settings` | 查询用户设置 | 轨迹保留天数等 |
+| `GET /audit-logs` | 查询统一审计 | 操作者类别、动作、对象、结果、安全摘要和时间 |
+| `GET /device-sessions` | 查询设备会话 | 地址摘要、收发计数、解析错误、Q0/H0 和结束原因 |
 | `PUT /settings/location-history` | 修改轨迹保留期 | 只接受 7 或 30；缩短时需要确认字段 |
 | `POST /ble-events` | 同步 BLE 操作结果 | 事件 UUID、动作、设备时间、结果、回读状态 |
 | `POST /ble-observations` | 同步 BLE 主锁回读 | 观察 UUID、锁状态、观察时间、是否应用 |
@@ -111,6 +113,8 @@ Build 10 当前实现 `POST /api/v1/ble-observations`。请求必须使用配对
 Build 15 实现签名的 `POST /api/v1/ble-events`。请求必须使用规范 UUID，`Idempotency-Key` 必须与事件 UUID 一致。服务端先全局去重，再按时效、BLE 结果、动作与回读一致性、当前锁状态时间判定是否产生状态影响。无论是否生效都保留审计记录；只有新建且生效的在线事件才进入 D1 协调。
 
 Build 13 已实现 `GET /api/v1/trips`、`GET /api/v1/trips/{trip_id}`、`GET /api/v1/settings` 和签名的 `PUT /api/v1/settings/location-history`。保留期只接受 7 或 30，缩短到 7 天必须携带确认字段，并在下一次每日清理时生效。
+
+Build 16 扩展 `GET /api/v1/settings`，只把 `location_history_days` 标记为可修改，其余命令超时、通信静默、离线、布防、定位质量和离线移动阈值均为服务端受控只读值。新增 `GET /api/v1/audit-logs` 和 `GET /api/v1/device-sessions`，只返回安全摘要和带随机盐的地址指纹，不返回原始网络地址、签名、nonce、令牌或设备密钥。
 
 `GET /capabilities` 的每项至少包含 `capability_id`、中文名称、协议编号、通道、参数模式、风险等级、证据等级、是否可执行和禁用原因。App 与本地 BLE 能力目录按 `capability_id` 合并，但不能由服务端文本动态生成未经审核的操作按钮。
 
@@ -139,13 +143,10 @@ Build 13 已实现 `GET /api/v1/trips`、`GET /api/v1/trips/{trip_id}`、`GET /a
 | `location.once` | `D0` | 在线；30 秒等待有效或无效定位 |
 | `vehicle.find_sound` | `V0,2` | 在线；10 秒冷却 |
 | `telemetry.refresh` | `S6` | 在线；只读 |
-| `wheel_lock.query` | `L5,34` | 在线；只读诊断 |
-| `wheel_lock.unlock` | `L5,2` | Face ID、维护区确认 |
-| `wheel_lock.lock` | `L5,18` | Face ID、维护区确认、静止预检 |
 | `alarm.acknowledge` | 服务端状态转换，在线时下发 `D1` | 活动告警存在；IoT 离线时只更新服务端状态 |
 | `tracking.set_policy` | 按策略下发 `D1` | 维护权限，不允许任意原始值 |
 
-其余协议能力由 `/capabilities` 展示。只有实现显式参数校验、结果解析和验收标签后，才允许执行。
+其余协议能力由 `/capabilities` 展示。当前车辆的 `L5` 与 BLE `0x81` 实测无回包，统一标记为“不适用”并禁用。只有实现显式参数校验、结果解析和验收标签后，才允许执行。
 
 任何需要向 IoT 下发协议帧的请求，在设备处于 `silent` 或 `offline` 时立即返回 `rejected`，包括 `D0`、`D1`、`S5`、H0 间隔相关配置和所有控制指令。H0 本身是设备上行心跳，不作为下行命令。服务端不创建待发送队列，也不在重连时重放被拒绝的请求。App 的状态读取和 BLE 事件上传不属于设备下行请求，仍可正常处理。
 

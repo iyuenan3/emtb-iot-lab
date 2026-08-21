@@ -49,6 +49,68 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(len(result["events"]), 2)
 
+    def test_device_session_replacement_counts_and_privacy(self):
+        first = self.database.open_device_session(
+            self.vehicle_id, "0123456789abcdef", now=100
+        )
+        self.database.record_device_rx(first["id"], "Q0", now=101)
+        self.database.record_device_rx(first["id"], "H0", now=102)
+        self.database.record_device_tx(first["id"], now=103)
+        self.database.record_device_parse_error(first["id"])
+        second = self.database.open_device_session(
+            self.vehicle_id, "fedcba9876543210", now=104
+        )
+
+        sessions = self.database.device_sessions(self.vehicle_id)
+        stored_first = next(item for item in sessions if item["id"] == first["id"])
+        stored_second = next(item for item in sessions if item["id"] == second["id"])
+        self.assertEqual(stored_first["disconnect_reason"], "replaced")
+        self.assertEqual(stored_first["rx_count"], 2)
+        self.assertEqual(stored_first["tx_count"], 1)
+        self.assertEqual(stored_first["parse_error_count"], 1)
+        self.assertEqual(stored_first["last_q0_at"], 101)
+        self.assertEqual(stored_first["last_h0_at"], 102)
+        self.assertIsNone(stored_second["disconnected_at"])
+        self.assertNotIn("peer_address", stored_second)
+        self.assertEqual(
+            self.database.close_active_device_sessions(
+                self.vehicle_id, "service_restarted", now=105
+            ),
+            1,
+        )
+        restarted = self.database.device_session(second["id"])
+        self.assertEqual(restarted["disconnect_reason"], "service_restarted")
+
+    def test_audit_covers_pairing_commands_settings_and_locations_without_secrets(self):
+        code = self.database.create_pairing_code()
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        client = self.database.complete_pairing(
+            code, "iPhone", "secret-read-token", public
+        )
+        command, _ = self.database.create_command(
+            self.vehicle_id, client["client_id"], "vehicle.find_sound", {}, "request"
+        )
+        self.database.transition_command(command["id"], "succeeded", {"function": "V0"})
+        self.database.set_location_history_days(
+            self.vehicle_id, 30, actor=client["client_id"], request_id="settings-request"
+        )
+        self.database.save_location(
+            self.vehicle_id, source="once", device_timestamp=int(time.time()),
+            valid=True, latitude=30.0, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("private-raw",),
+        )
+
+        logs = self.database.audit_logs(100)
+        actions = {item["action"] for item in logs}
+        self.assertIn("pairing.complete", actions)
+        self.assertIn("command.created", actions)
+        self.assertIn("command.status", actions)
+        self.assertIn("settings.location_history.updated", actions)
+        self.assertIn("location.received", actions)
+        serialized = str(logs)
+        self.assertNotIn("secret-read-token", serialized)
+        self.assertNotIn("private-raw", serialized)
+
     def test_nonce_cannot_be_replayed(self):
         code = self.database.create_pairing_code()
         public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")

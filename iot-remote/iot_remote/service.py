@@ -1,8 +1,10 @@
 """IoT TCP 网关、HTTP API 和单命令状态机。"""
 
 import asyncio
+import hashlib
 import json
 import logging
+import secrets
 import signal
 import time
 import uuid
@@ -31,6 +33,149 @@ SUPPORTED_COMMANDS = {
 SERVER_COMMANDS = {"security.confirm_locked", "security.arm", "alarm.acknowledge"}
 TRACKING_POLICIES = {"unlocked": 60, "locked": 3600, "alarm": 300}
 
+CAPABILITY_CATALOG: tuple[dict[str, Any], ...] = (
+    {"id": "vehicle.unlock", "name": "主开锁", "group": "常用控制", "protocol": "L0",
+     "channel": "IoT 云端", "purpose": "解除主锁并开始骑行", "risk": "高",
+     "support_status": "实车已验证", "executable": True, "parameters_schema": "无",
+     "persistence": "设备状态"},
+    {"id": "vehicle.lock", "name": "主关锁", "group": "常用控制", "protocol": "L1",
+     "channel": "IoT 云端", "purpose": "车辆停稳后关闭主锁", "risk": "高",
+     "support_status": "实车已验证", "executable": True,
+     "parameters_schema": "需要停稳确认", "persistence": "设备状态"},
+    {"id": "location.once", "name": "单次定位", "group": "常用控制", "protocol": "D0",
+     "channel": "IoT 云端", "purpose": "请求一次车辆定位", "risk": "低",
+     "support_status": "协议明确未验证", "executable": True, "parameters_schema": "无",
+     "persistence": "服务端轨迹"},
+    {"id": "vehicle.find_sound", "name": "声音找车", "group": "常用控制", "protocol": "V0",
+     "channel": "IoT 云端", "purpose": "触发车辆声音提示", "risk": "中",
+     "support_status": "实车已验证", "executable": True, "parameters_schema": "10 秒冷却",
+     "persistence": "不持久化到设备"},
+    {"id": "iot.q0", "name": "心跳状态", "group": "状态与诊断", "protocol": "Q0",
+     "channel": "IoT 上报", "purpose": "读取设备心跳与在线状态", "risk": "低",
+     "support_status": "只读上报", "executable": False, "parameters_schema": "无",
+     "persistence": "会话计数"},
+    {"id": "iot.h0", "name": "锁与电源状态", "group": "状态与诊断", "protocol": "H0",
+     "channel": "IoT 上报", "purpose": "更新锁状态、电压与电量", "risk": "低",
+     "support_status": "只读上报", "executable": False, "parameters_schema": "无",
+     "persistence": "车辆状态"},
+    {"id": "telemetry.refresh", "name": "设备信息", "group": "状态与诊断", "protocol": "S6",
+     "channel": "IoT 云端", "purpose": "刷新设备信息，当前只解释电量字段", "risk": "低",
+     "support_status": "实车已验证", "executable": True, "parameters_schema": "无",
+     "persistence": "车辆状态"},
+    {"id": "iot.g0", "name": "基站信息", "group": "状态与诊断", "protocol": "G0",
+     "channel": "IoT 上报", "purpose": "查看基站定位信息", "risk": "低",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "无",
+     "persistence": "未接入"},
+    {"id": "iot.e0", "name": "故障信息", "group": "状态与诊断", "protocol": "E0",
+     "channel": "IoT 上报", "purpose": "查看设备故障码", "risk": "低",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "无",
+     "persistence": "未接入"},
+    {"id": "iot.i0", "name": "设备身份信息", "group": "状态与诊断", "protocol": "I0",
+     "channel": "IoT 上报", "purpose": "查看设备身份摘要", "risk": "低",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "无",
+     "persistence": "未接入"},
+    {"id": "iot.m0", "name": "里程信息", "group": "状态与诊断", "protocol": "M0",
+     "channel": "IoT 上报", "purpose": "查看设备里程字段", "risk": "低",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "无",
+     "persistence": "未接入"},
+    {"id": "iot.z0", "name": "扩展状态", "group": "状态与诊断", "protocol": "Z0",
+     "channel": "IoT 上报", "purpose": "查看厂商扩展状态", "risk": "低",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "无",
+     "persistence": "未接入"},
+    {"id": "wheel_lock", "name": "外部车轮锁", "group": "外部锁", "protocol": "L5",
+     "channel": "IoT 云端", "purpose": "查询或控制外部车轮锁", "risk": "危险维护",
+     "support_status": "不适用", "executable": False, "parameters_schema": "禁用",
+     "persistence": "当前车辆无回包"},
+    {"id": "iot.s5", "name": "设备参数组", "group": "车辆设置", "protocol": "S5",
+     "channel": "IoT 云端", "purpose": "读取或修改设备参数", "risk": "高",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "近场维护",
+     "persistence": "取决于设备参数"},
+    {"id": "tracking.set_policy", "name": "定位上报间隔", "group": "车辆设置", "protocol": "D1",
+     "channel": "IoT 云端", "purpose": "协调解锁、关锁和告警定位频率", "risk": "中",
+     "support_status": "协议明确未验证", "executable": True,
+     "parameters_schema": "60、300 或 3600 秒", "persistence": "设备确认值"},
+    {"id": "iot.s7", "name": "扩展参数", "group": "车辆设置", "protocol": "S7",
+     "channel": "IoT 云端", "purpose": "读取或修改扩展参数", "risk": "高",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "近场维护",
+     "persistence": "未确认"},
+    {"id": "iot.s4", "name": "通信参数", "group": "车辆设置", "protocol": "S4",
+     "channel": "IoT 云端", "purpose": "读取或修改通信参数", "risk": "危险维护",
+     "support_status": "危险维护", "executable": False, "parameters_schema": "近场维护",
+     "persistence": "可能改变联网能力"},
+    {"id": "iot.w0", "name": "异常移动", "group": "事件", "protocol": "W0",
+     "channel": "IoT 上报", "purpose": "上报车辆异常移动", "risk": "低",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "无",
+     "persistence": "告警事件"},
+    {"id": "iot.s1", "name": "设备事件", "group": "事件", "protocol": "S1",
+     "channel": "IoT 上报", "purpose": "上报设备扩展事件", "risk": "低",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "无",
+     "persistence": "未接入"},
+    {"id": "iot.k0", "name": "设备密钥", "group": "密钥与升级", "protocol": "K0",
+     "channel": "IoT 云端", "purpose": "修改设备认证材料", "risk": "危险维护",
+     "support_status": "危险维护", "executable": False, "parameters_schema": "禁止云端执行",
+     "persistence": "设备安全区"},
+    {"id": "iot.u0", "name": "升级准备", "group": "密钥与升级", "protocol": "U0",
+     "channel": "IoT 云端", "purpose": "固件升级准备", "risk": "危险维护",
+     "support_status": "危险维护", "executable": False, "parameters_schema": "禁止云端执行",
+     "persistence": "固件"},
+    {"id": "iot.u1", "name": "升级传输", "group": "密钥与升级", "protocol": "U1",
+     "channel": "IoT 云端", "purpose": "固件升级传输", "risk": "危险维护",
+     "support_status": "危险维护", "executable": False, "parameters_schema": "禁止云端执行",
+     "persistence": "固件"},
+    {"id": "iot.u2", "name": "升级完成", "group": "密钥与升级", "protocol": "U2",
+     "channel": "IoT 云端", "purpose": "固件升级完成确认", "risk": "危险维护",
+     "support_status": "危险维护", "executable": False, "parameters_schema": "禁止云端执行",
+     "persistence": "固件"},
+    {"id": "internal.r0", "name": "控制鉴权", "group": "内部流程", "protocol": "R0",
+     "channel": "IoT 内部", "purpose": "主锁控制前的设备鉴权", "risk": "高",
+     "support_status": "内部流程", "executable": False, "parameters_schema": "由状态机生成",
+     "persistence": "命令事件"},
+    {"id": "internal.auth", "name": "设备连接认证", "group": "内部流程", "protocol": "连接认证",
+     "channel": "IoT 内部", "purpose": "识别目标设备并替换旧会话", "risk": "高",
+     "support_status": "内部流程", "executable": False, "parameters_schema": "自动",
+     "persistence": "设备会话"},
+    {"id": "internal.ack", "name": "协议确认回包", "group": "内部流程", "protocol": "ACK",
+     "channel": "IoT 内部", "purpose": "完成协议要求的确认", "risk": "中",
+     "support_status": "内部流程", "executable": False, "parameters_schema": "自动",
+     "persistence": "会话计数"},
+    {"id": "internal.error", "name": "异常帧处理", "group": "内部流程", "protocol": "错误帧",
+     "channel": "IoT 内部", "purpose": "拒绝错误或非目标设备帧", "risk": "低",
+     "support_status": "内部流程", "executable": False, "parameters_schema": "自动",
+     "persistence": "解析错误计数"},
+    {"id": "security.confirm_locked", "name": "确认物理关锁", "group": "安全状态", "protocol": "服务端",
+     "channel": "服务端", "purpose": "现场确认后进入布防等待", "risk": "高",
+     "support_status": "协议明确未验证", "executable": True, "parameters_schema": "物理状态确认",
+     "persistence": "安全状态"},
+    {"id": "security.arm", "name": "手动布防", "group": "安全状态", "protocol": "服务端",
+     "channel": "服务端", "purpose": "不改变机械锁的手动布防", "risk": "高",
+     "support_status": "协议明确未验证", "executable": True, "parameters_schema": "风险确认",
+     "persistence": "安全状态"},
+    {"id": "alarm.acknowledge", "name": "确认告警", "group": "安全状态", "protocol": "服务端",
+     "channel": "服务端", "purpose": "确认并解除当前活动告警", "risk": "高",
+     "support_status": "协议明确未验证", "executable": True, "parameters_schema": "设备身份验证",
+     "persistence": "告警与安全状态"},
+    {"id": "archive.rfid", "name": "RFID 扩展", "group": "归档扩展", "protocol": "归档",
+     "channel": "近场 BLE", "purpose": "历史 RFID 能力", "risk": "高",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "只展示",
+     "persistence": "未接入"},
+    {"id": "archive.power", "name": "设备电源", "group": "归档扩展", "protocol": "归档",
+     "channel": "近场 BLE", "purpose": "设备电源维护", "risk": "危险维护",
+     "support_status": "危险维护", "executable": False, "parameters_schema": "只展示",
+     "persistence": "设备状态"},
+    {"id": "archive.logs", "name": "设备日志", "group": "归档扩展", "protocol": "归档",
+     "channel": "近场 BLE", "purpose": "读取设备日志", "risk": "中",
+     "support_status": "协议明确未验证", "executable": False, "parameters_schema": "只展示",
+     "persistence": "不上传"},
+    {"id": "archive.system_transfer", "name": "系统信息传输", "group": "归档扩展", "protocol": "归档",
+     "channel": "近场 BLE", "purpose": "读取或写入系统信息", "risk": "危险维护",
+     "support_status": "危险维护", "executable": False, "parameters_schema": "只展示",
+     "persistence": "设备参数"},
+    {"id": "archive.ota", "name": "近场 OTA", "group": "归档扩展", "protocol": "归档",
+     "channel": "近场 BLE", "purpose": "固件升级", "risk": "危险维护",
+     "support_status": "危险维护", "executable": False, "parameters_schema": "只展示",
+     "persistence": "固件"},
+)
+
 
 class APIError(Exception):
     def __init__(self, status: int, code: str, message: str):
@@ -55,6 +200,7 @@ class DeviceSession:
     vendor: str
     last_frame_at: float
     policy_reconciled: bool = False
+    session_id: Optional[str] = None
 
 
 class RemoteService:
@@ -99,6 +245,9 @@ class RemoteService:
         self._cleanup_task: Optional[asyncio.Task[None]] = None
         self._alarm_workflow: Optional[dict[str, str]] = None
         self._reconnect_workflow: Optional[dict[str, Any]] = None
+        self.database.close_active_device_sessions(
+            self.vehicle_id, "service_restarted"
+        )
         self.database.mark_inflight_unknown()
 
     def is_online(self) -> bool:
@@ -141,14 +290,18 @@ class RemoteService:
         self._timeout_tasks.clear()
 
         writer: Optional[asyncio.StreamWriter] = None
+        session_id: Optional[str] = None
         async with self._session_lock:
             if self.session is not None:
                 writer = self.session.writer
+                session_id = self.session.session_id
                 self.session = None
             self.database.update_vehicle_state(self.vehicle_id, online=0)
             active = self.database.active_command(self.vehicle_id)
             if active:
                 self._finish(active["id"], "unknown", "service_stopped")
+            if session_id is not None:
+                self.database.close_device_session(session_id, "service_stopped")
         if writer is not None:
             await _close_writer(writer)
 
@@ -156,6 +309,7 @@ class RemoteService:
                             writer: asyncio.StreamWriter) -> None:
         buffer = b""
         authenticated = False
+        disconnect_reason = "peer_closed"
         LOGGER.info("device connection opened")
         try:
             while True:
@@ -167,6 +321,11 @@ class RemoteService:
                 for raw_frame in frames:
                     frame = parse_frame(raw_frame)
                     if frame is None:
+                        if authenticated and self.session and self.session.writer is writer:
+                            if self.session.session_id is not None:
+                                self.database.record_device_parse_error(
+                                    self.session.session_id
+                                )
                         continue
                     if frame.imei != self.target_imei:
                         LOGGER.warning("rejected non-target device")
@@ -174,7 +333,11 @@ class RemoteService:
                     authenticated = True
                     await self._accept_session(writer, frame)
                     await self.process_frame(frame)
-        except (asyncio.TimeoutError, ConnectionError):
+        except asyncio.TimeoutError:
+            disconnect_reason = "receive_timeout"
+            LOGGER.info("device connection ended")
+        except ConnectionError:
+            disconnect_reason = "connection_error"
             LOGGER.info("device connection ended")
         finally:
             async with self._session_lock:
@@ -184,6 +347,10 @@ class RemoteService:
                     self._alarm_workflow = None
                     self._reconnect_workflow = None
                     self.database.mark_device_disconnected(self.vehicle_id)
+                    if self.session.session_id is not None:
+                        self.database.close_device_session(
+                            self.session.session_id, disconnect_reason
+                        )
                     active = self.database.active_command(self.vehicle_id)
                     if active:
                         self._finish(active["id"], "unknown", "connection_lost")
@@ -198,10 +365,28 @@ class RemoteService:
                 self.session.last_frame_at = time.monotonic()
                 return
             if self.session and self.session.writer is not writer:
+                if self.session.session_id is not None:
+                    self.database.close_device_session(
+                        self.session.session_id, "replaced"
+                    )
                 self.session.writer.close()
             self._policy_reconcile_pending = False
             self._reconnect_workflow = None
-            self.session = DeviceSession(writer, frame.vendor, time.monotonic())
+            peer = None
+            get_extra_info = getattr(writer, "get_extra_info", None)
+            if callable(get_extra_info):
+                peer = get_extra_info("peername")
+            salt = secrets.token_bytes(16)
+            peer_fingerprint = hashlib.sha256(
+                salt + repr(peer).encode("utf-8", errors="replace")
+            ).hexdigest()[:16]
+            stored_session = self.database.open_device_session(
+                self.vehicle_id, peer_fingerprint
+            )
+            self.session = DeviceSession(
+                writer, frame.vendor, time.monotonic(),
+                session_id=stored_session["id"],
+            )
             self.database.update_vehicle_state(
                 self.vehicle_id, online=1, last_seen_at=int(time.time())
             )
@@ -209,6 +394,10 @@ class RemoteService:
     async def process_frame(self, frame: Frame) -> None:
         if self.session:
             self.session.last_frame_at = time.monotonic()
+            if self.session.session_id is not None:
+                self.database.record_device_rx(
+                    self.session.session_id, frame.function
+                )
         fields = tuple(field.strip() for field in frame.fields)
         reconcile_new_session = False
         location_report = None
@@ -649,6 +838,8 @@ class RemoteService:
             build_downlink(self.session.vendor, self.target_imei, function, fields)
         )
         await self.session.writer.drain()
+        if self.session.session_id is not None:
+            self.database.record_device_tx(self.session.session_id)
         LOGGER.info("downlink sent function=%s", function)
 
     async def dispatch_command(self, command_id: str) -> None:
@@ -808,7 +999,7 @@ class RemoteService:
         vehicle = self.database.vehicle(self.vehicle_id)
         confirm_lock_enabled = vehicle["lock_state"] == "locked"
         acknowledge_enabled = vehicle["active_alarm_id"] is not None
-        return {
+        dynamic = {
             "vehicle.unlock": {"enabled": online, "reason": disabled_reason},
             "vehicle.lock": {
                 "enabled": online,
@@ -838,6 +1029,69 @@ class RemoteService:
             },
             "wheel_lock": {"enabled": False, "reason": "unsupported_hardware"},
         }
+        catalog: dict[str, Any] = {}
+        for definition in CAPABILITY_CATALOG:
+            capability_id = definition["id"]
+            item = {key: value for key, value in definition.items() if key != "id"}
+            item["capability_id"] = capability_id
+            item["evidence_level"] = item["support_status"]
+            state = dynamic.get(capability_id, {})
+            item.update(state)
+            item.setdefault("enabled", False)
+            if not item["executable"]:
+                item["enabled"] = False
+                item.setdefault("reason", "catalog_only")
+            else:
+                item.setdefault("reason", None)
+            item["disabled_reason"] = item["reason"]
+            latest = self.database.latest_command(self.vehicle_id, capability_id)
+            if latest is not None:
+                result = latest.get("result") or {}
+                item["latest_result"] = {
+                    "status": latest["status"],
+                    "created_at": latest["created_at"],
+                    "completed_at": latest["completed_at"],
+                    "error_code": latest["error_code"],
+                    "raw_response_summary": json.dumps(
+                        result, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"),
+                    ) if result else "",
+                }
+            else:
+                item["latest_result"] = None
+            catalog[capability_id] = item
+        return catalog
+
+    def settings_payload(self) -> dict[str, Any]:
+        result = self.database.settings(self.vehicle_id)
+        result.update({
+            "mutable_fields": ["location_history_days"],
+            "command_timeout_seconds": self.command_timeout,
+            "silence_window_seconds": self.silence_window,
+            "offline_window_seconds": self.offline_window,
+            "lock_grace_seconds": self.lock_grace_seconds,
+            "location_min_satellites": self.location_min_satellites,
+            "location_max_hdop": self.location_max_hdop,
+            "location_max_speed_mps": self.location_max_speed_mps,
+            "offline_movement_threshold_m": self.offline_movement_threshold_m,
+            "offline_sample_max_separation_m": self.offline_sample_max_separation_m,
+            "event_retention_days": 30,
+            "device_session_retention_days": 7,
+        })
+        return result
+
+    def device_sessions_payload(self, limit: int) -> list[dict[str, Any]]:
+        result = self.database.device_sessions(self.vehicle_id, limit)
+        active_id = self.session.session_id if self.session else None
+        for item in result:
+            is_current = item["id"] == active_id and item["disconnected_at"] is None
+            item["current"] = is_current
+            item["silence_seconds"] = self.last_frame_age_seconds() if is_current else None
+            item["connectivity_state"] = self.connectivity_state() if is_current else "offline"
+            item["offline_reason"] = (
+                None if is_current else item["disconnect_reason"] or "not_current"
+            )
+        return result
 
     async def handle_http(self, reader: asyncio.StreamReader,
                           writer: asyncio.StreamWriter) -> None:
@@ -901,6 +1155,24 @@ class RemoteService:
             return {"vehicle": vehicle}, 200
         if request.method == "GET" and request.path == "/api/v1/capabilities":
             return {"capabilities": self.capabilities()}, 200
+        if request.method == "GET" and request.path == "/api/v1/audit-logs":
+            query = parse_qs(request.query, keep_blank_values=True)
+            try:
+                limit = int(query.get("limit", ["100"])[0])
+            except ValueError:
+                raise APIError(400, "invalid_audit_query", "审计查询参数无效")
+            if not 1 <= limit <= 500:
+                raise APIError(400, "invalid_audit_query", "审计查询参数超出范围")
+            return {"audit_logs": self.database.audit_logs(limit)}, 200
+        if request.method == "GET" and request.path == "/api/v1/device-sessions":
+            query = parse_qs(request.query, keep_blank_values=True)
+            try:
+                limit = int(query.get("limit", ["50"])[0])
+            except ValueError:
+                raise APIError(400, "invalid_session_query", "会话查询参数无效")
+            if not 1 <= limit <= 100:
+                raise APIError(400, "invalid_session_query", "会话查询参数超出范围")
+            return {"device_sessions": self.device_sessions_payload(limit)}, 200
         if request.method == "GET" and request.path == "/api/v1/locations":
             query = parse_qs(request.query, keep_blank_values=True)
             try:
@@ -947,7 +1219,7 @@ class RemoteService:
                 )
             }, 200
         if request.method == "GET" and request.path == "/api/v1/settings":
-            return {"settings": self.database.settings(self.vehicle_id)}, 200
+            return {"settings": self.settings_payload()}, 200
         if (request.method == "PUT"
                 and request.path == "/api/v1/settings/location-history"):
             self._verify_control_signature(request, client)
@@ -959,11 +1231,13 @@ class RemoteService:
                 settings = self.database.set_location_history_days(
                     self.vehicle_id, days,
                     confirm_shorten=body.get("confirm_shorten") is True,
+                    actor=client["id"],
+                    request_id=request.headers.get("idempotency-key"),
                 )
             except PermissionError:
                 raise APIError(422, "history_shorten_confirmation_required",
                                "缩短轨迹保留期需要二次确认")
-            return {"settings": settings}, 200
+            return {"settings": self.settings_payload()}, 200
         if request.method == "POST" and request.path == "/api/v1/ble-observations":
             self._verify_control_signature(request, client)
             body = self._json(request)

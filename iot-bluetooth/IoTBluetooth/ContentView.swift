@@ -798,11 +798,13 @@ private struct MoreView: View {
         List {
             Section("连接与诊断") {
                 NavigationLink { RemoteControlView() } label: { MoreRow("远程服务", icon: "antenna.radiowaves.left.and.right", color: .indigo) }
+                NavigationLink { CommandCenterView() } label: { MoreRow("指令中心", icon: "square.grid.2x2.fill", color: .purple) }
+                NavigationLink { RemoteAuditView() } label: { MoreRow("审计与会话", icon: "list.clipboard.fill", color: .cyan) }
                 NavigationLink { DeviceInfoView() } label: { MoreRow("设备信息", icon: "info.circle.fill", color: .blue) }
                 NavigationLink { SecurityAndLogView() } label: { MoreRow("密钥与日志", icon: "lock.shield.fill", color: .green) }
             }
             Section("高级工具") {
-                NavigationLink { DataRetentionView() } label: { MoreRow("数据保留", icon: "externaldrive.fill", color: .teal) }
+                NavigationLink { DataRetentionView() } label: { MoreRow("服务设置", icon: "gearshape.fill", color: .teal) }
                 NavigationLink { ControlsView() } label: { MoreRow("设备控制", icon: "slider.horizontal.3", color: .orange) }
                 NavigationLink { MaintenanceView() } label: { MoreRow("设备维护", icon: "wrench.and.screwdriver.fill", color: .red) }
             }
@@ -851,11 +853,28 @@ private struct DataRetentionView: View {
                 Text("已结束骑行按结束时间整体清理，避免留下半条轨迹。当前骑行不参与清理。")
                 Text("从 7 天改为 30 天立即生效，但不能恢复已经删除的数据。从 30 天改为 7 天需要确认，并在下一次清理时生效。")
             }
+            Section("服务端控制参数") {
+                LabeledContent("指令超时", value: seconds(remote.settings?.commandTimeoutSeconds))
+                LabeledContent("通信静默", value: seconds(remote.settings?.silenceWindowSeconds))
+                LabeledContent("判定离线", value: seconds(remote.settings?.offlineWindowSeconds))
+                LabeledContent("布防等待", value: seconds(remote.settings?.lockGraceSeconds))
+                LabeledContent("最少卫星", value: remote.settings?.locationMinSatellites.map { "\($0) 颗" } ?? "未读取")
+                LabeledContent("最大 HDOP", value: number(remote.settings?.locationMaxHdop))
+                LabeledContent("最大定位速度", value: metersPerSecond(remote.settings?.locationMaxSpeedMps))
+                LabeledContent("离线移动阈值", value: meters(remote.settings?.offlineMovementThresholdM))
+                LabeledContent("双样本间距", value: meters(remote.settings?.offlineSampleMaxSeparationM))
+                Text("这些参数由服务部署配置控制，App 只读展示。当前唯一可修改项是轨迹保留天数。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("事件保留") {
+                LabeledContent("命令、告警与审计", value: days(remote.settings?.eventRetentionDays))
+                LabeledContent("设备会话详情", value: days(remote.settings?.deviceSessionRetentionDays))
+            }
             if !remote.message.isEmpty {
                 Section { Text(remote.message).foregroundStyle(.secondary) }
             }
         }
-        .navigationTitle("数据保留")
+        .navigationTitle("服务设置")
         .task { if remote.isPaired { await remote.refresh() } }
         .alert("改为保留 7 天？", isPresented: $showShortenConfirmation) {
             Button("取消", role: .cancel) { }
@@ -865,6 +884,26 @@ private struct DataRetentionView: View {
         } message: {
             Text("下一次清理会删除超过 7 天的已结束骑行和普通定位，已删除数据无法恢复。")
         }
+    }
+
+    private func seconds(_ value: Int?) -> String {
+        value.map { "\($0) 秒" } ?? "未读取"
+    }
+
+    private func days(_ value: Int?) -> String {
+        value.map { "\($0) 天" } ?? "未读取"
+    }
+
+    private func number(_ value: Double?) -> String {
+        value.map { String(format: "%.1f", $0) } ?? "未读取"
+    }
+
+    private func meters(_ value: Double?) -> String {
+        value.map { String(format: "%.0f 米", $0) } ?? "未读取"
+    }
+
+    private func metersPerSecond(_ value: Double?) -> String {
+        value.map { String(format: "%.0f 米/秒", $0) } ?? "未读取"
     }
 }
 

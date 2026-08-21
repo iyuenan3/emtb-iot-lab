@@ -53,12 +53,67 @@ struct RemoteCapability: Decodable {
     let reason: String?
     let cooldownSeconds: Int?
     let graceSeconds: Int?
+    let capabilityID: String?
+    let name: String?
+    let group: String?
+    let protocolName: String?
+    let channel: String?
+    let purpose: String?
+    let risk: String?
+    let supportStatus: String?
+    let evidenceLevel: String?
+    let executable: Bool?
+    let disabledReason: String?
+    let parametersSchema: String?
+    let persistence: String?
+    let latestResult: RemoteCapabilityLatestResult?
 
     enum CodingKeys: String, CodingKey {
         case enabled, reason
         case cooldownSeconds = "cooldown_seconds"
         case graceSeconds = "grace_seconds"
+        case capabilityID = "capability_id"
+        case name, group, channel, purpose, risk, executable, persistence
+        case protocolName = "protocol"
+        case supportStatus = "support_status"
+        case evidenceLevel = "evidence_level"
+        case disabledReason = "disabled_reason"
+        case parametersSchema = "parameters_schema"
+        case latestResult = "latest_result"
     }
+}
+
+struct RemoteCapabilityLatestResult: Decodable {
+    let status: String
+    let createdAt: Int
+    let completedAt: Int?
+    let errorCode: String?
+    let rawResponseSummary: String
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case createdAt = "created_at"
+        case completedAt = "completed_at"
+        case errorCode = "error_code"
+        case rawResponseSummary = "raw_response_summary"
+    }
+}
+
+struct CapabilityDisplayItem: Identifiable {
+    let id: String
+    let name: String
+    let group: String
+    let protocolName: String
+    let channel: String
+    let purpose: String
+    let risk: String
+    let supportStatus: String
+    let enabled: Bool
+    let executable: Bool
+    let disabledReason: String?
+    let parametersSchema: String
+    let persistence: String
+    let latestResult: RemoteCapabilityLatestResult?
 }
 
 struct RemoteAlarm: Decodable, Identifiable {
@@ -111,10 +166,92 @@ struct RemoteTrip: Decodable, Identifiable {
 struct RemoteSettings: Decodable {
     let locationHistoryDays: Int
     let pendingLocationHistoryDays: Int?
+    let mutableFields: [String]?
+    let commandTimeoutSeconds: Int?
+    let silenceWindowSeconds: Int?
+    let offlineWindowSeconds: Int?
+    let lockGraceSeconds: Int?
+    let locationMinSatellites: Int?
+    let locationMaxHdop: Double?
+    let locationMaxSpeedMps: Double?
+    let offlineMovementThresholdM: Double?
+    let offlineSampleMaxSeparationM: Double?
+    let eventRetentionDays: Int?
+    let deviceSessionRetentionDays: Int?
 
     enum CodingKeys: String, CodingKey {
         case locationHistoryDays = "location_history_days"
         case pendingLocationHistoryDays = "pending_location_history_days"
+        case mutableFields = "mutable_fields"
+        case commandTimeoutSeconds = "command_timeout_seconds"
+        case silenceWindowSeconds = "silence_window_seconds"
+        case offlineWindowSeconds = "offline_window_seconds"
+        case lockGraceSeconds = "lock_grace_seconds"
+        case locationMinSatellites = "location_min_satellites"
+        case locationMaxHdop = "location_max_hdop"
+        case locationMaxSpeedMps = "location_max_speed_mps"
+        case offlineMovementThresholdM = "offline_movement_threshold_m"
+        case offlineSampleMaxSeparationM = "offline_sample_max_separation_m"
+        case eventRetentionDays = "event_retention_days"
+        case deviceSessionRetentionDays = "device_session_retention_days"
+    }
+}
+
+struct RemoteAuditLog: Decodable, Identifiable {
+    let id: Int
+    let actor: String
+    let action: String
+    let objectType: String
+    let objectID: String?
+    let result: String
+    let requestID: String?
+    let detailSummary: String
+    let createdAt: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, actor, action, result
+        case objectType = "object_type"
+        case objectID = "object_id"
+        case requestID = "request_id"
+        case detailSummary = "detail_summary"
+        case createdAt = "created_at"
+    }
+}
+
+struct RemoteDeviceSession: Decodable, Identifiable {
+    let id: String
+    let peerFingerprint: String
+    let connectedAt: Int
+    let disconnectedAt: Int?
+    let disconnectReason: String?
+    let rxCount: Int
+    let txCount: Int
+    let parseErrorCount: Int
+    let lastRxAt: Int?
+    let lastTxAt: Int?
+    let lastQ0At: Int?
+    let lastH0At: Int?
+    let current: Bool
+    let silenceSeconds: Int?
+    let connectivityState: String
+    let offlineReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, current
+        case peerFingerprint = "peer_fingerprint"
+        case connectedAt = "connected_at"
+        case disconnectedAt = "disconnected_at"
+        case disconnectReason = "disconnect_reason"
+        case rxCount = "rx_count"
+        case txCount = "tx_count"
+        case parseErrorCount = "parse_error_count"
+        case lastRxAt = "last_rx_at"
+        case lastTxAt = "last_tx_at"
+        case lastQ0At = "last_q0_at"
+        case lastH0At = "last_h0_at"
+        case silenceSeconds = "silence_seconds"
+        case connectivityState = "connectivity_state"
+        case offlineReason = "offline_reason"
     }
 }
 
@@ -221,6 +358,8 @@ final class RemoteControlManager: ObservableObject {
     @Published private(set) var selectedTrip: RemoteTrip?
     @Published private(set) var selectedTripPoints: [RemoteLocation] = []
     @Published private(set) var settings: RemoteSettings?
+    @Published private(set) var auditLogs: [RemoteAuditLog] = []
+    @Published private(set) var deviceSessions: [RemoteDeviceSession] = []
     @Published private(set) var latestLocation: RemoteLocation?
     @Published private(set) var lastLocationReport: RemoteLocation?
     @Published private(set) var locations: [RemoteLocation] = []
@@ -243,6 +382,56 @@ final class RemoteControlManager: ObservableObject {
 
     var isPaired: Bool {
         RemoteCredentialVault.clientID != nil && RemoteCredentialVault.readToken != nil
+    }
+
+    var capabilityCatalog: [CapabilityDisplayItem] {
+        let remoteItems = capabilities.map { key, capability in
+            CapabilityDisplayItem(
+                id: capability.capabilityID ?? key,
+                name: capability.name ?? key,
+                group: capability.group ?? "其他",
+                protocolName: capability.protocolName ?? "未标注",
+                channel: capability.channel ?? "远程服务",
+                purpose: capability.purpose ?? "服务端未提供用途说明",
+                risk: capability.risk ?? "未标注",
+                supportStatus: capability.supportStatus ?? capability.evidenceLevel ?? "未标注",
+                enabled: capability.enabled,
+                executable: capability.executable ?? false,
+                disabledReason: capability.disabledReason ?? capability.reason,
+                parametersSchema: capability.parametersSchema ?? "未标注",
+                persistence: capability.persistence ?? "未标注",
+                latestResult: capability.latestResult
+            )
+        }
+        return remoteItems + Self.localBLECatalog
+    }
+
+    private static let localBLECatalog: [CapabilityDisplayItem] = [
+        localBLE("ble.01", "连接认证", "0x01", "内部流程", "内部流程", "识别并认证目标 BLE 设备", "高"),
+        localBLE("ble.05", "主开锁", "0x05", "常用控制", "实车已验证", "近场解除主锁", "高", executable: true),
+        localBLE("ble.10", "命令错误", "0x10", "内部流程", "内部流程", "设备返回协议错误", "低"),
+        localBLE("ble.15", "主关锁", "0x15", "常用控制", "实车已验证", "近场关闭主锁", "高", executable: true),
+        localBLE("ble.31", "锁状态详情", "0x31", "状态与诊断", "实车已验证", "读取主锁状态与详情", "低", executable: true),
+        localBLE("ble.51", "旧骑行数据", "0x51", "归档扩展", "协议明确未验证", "读取历史骑行数据", "中"),
+        localBLE("ble.52", "清除旧数据", "0x52", "归档扩展", "危险维护", "清除设备侧历史骑行数据", "危险维护"),
+        localBLE("ble.60", "骑行信息", "0x60", "状态与诊断", "协议明确未验证", "读取当前骑行信息", "低"),
+        localBLE("ble.61", "基础设置", "0x61", "车辆设置", "协议明确未验证", "读取或修改基础设置", "高"),
+        localBLE("ble.62", "扩展设置", "0x62", "车辆设置", "协议明确未验证", "读取或修改扩展设置", "高"),
+        localBLE("ble.81", "外部车轮锁", "0x81", "外部锁", "不适用", "查询或控制外部车轮锁", "危险维护")
+    ]
+
+    private static func localBLE(
+        _ id: String, _ name: String, _ protocolName: String, _ group: String,
+        _ status: String, _ purpose: String, _ risk: String, executable: Bool = false
+    ) -> CapabilityDisplayItem {
+        CapabilityDisplayItem(
+            id: id, name: name, group: group, protocolName: protocolName,
+            channel: "近场 BLE", purpose: purpose, risk: risk,
+            supportStatus: status, enabled: false, executable: executable,
+            disabledReason: executable ? "请使用车辆首页的固定近场入口" : "目录只展示，不开放执行",
+            parametersSchema: "固定协议参数", persistence: "取决于设备命令",
+            latestResult: nil
+        )
     }
 
     func pair(code: String) async {
@@ -453,6 +642,8 @@ final class RemoteControlManager: ObservableObject {
         selectedTrip = nil
         selectedTripPoints = []
         settings = nil
+        auditLogs = []
+        deviceSessions = []
         latestLocation = nil
         lastLocationReport = nil
         locations = []
@@ -522,6 +713,24 @@ final class RemoteControlManager: ObservableObject {
                 settings = try decoder.decode(
                     RemoteSettings.self,
                     from: JSONSerialization.data(withJSONObject: settingsObject)
+                )
+            }
+        } catch { }
+        do {
+            let auditResponse = try await request(path: "/api/v1/audit-logs?limit=100")
+            if let auditObject = auditResponse["audit_logs"] {
+                auditLogs = try decoder.decode(
+                    [RemoteAuditLog].self,
+                    from: JSONSerialization.data(withJSONObject: auditObject)
+                )
+            }
+        } catch { }
+        do {
+            let sessionResponse = try await request(path: "/api/v1/device-sessions?limit=50")
+            if let sessionObject = sessionResponse["device_sessions"] {
+                deviceSessions = try decoder.decode(
+                    [RemoteDeviceSession].self,
+                    from: JSONSerialization.data(withJSONObject: sessionObject)
                 )
             }
         } catch { }
