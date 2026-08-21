@@ -165,9 +165,13 @@ private struct VehicleHomeView: View {
         if device.isReady {
             HStack(spacing: 12) {
                 LongPressActionButton(title: "长按开锁", icon: "lock.open", color: .orange,
-                                      enabled: !device.isBusy && device.snapshot.isLocked != false) { device.unlock() }
+                                      enabled: !device.isBusy && device.snapshot.isLocked != false) {
+                    Task { await device.unlockWithOwnerAuthentication() }
+                }
                 LongPressActionButton(title: "长按关锁", icon: "lock", color: .indigo,
-                                      enabled: !device.isBusy && device.snapshot.isLocked != true) { device.lock() }
+                                      enabled: !device.isBusy && device.snapshot.isLocked != true) {
+                    Task { await device.lockWithOwnerAuthentication() }
+                }
             }
             HStack {
                 Button("刷新", systemImage: "arrow.clockwise") { device.refreshAll() }
@@ -981,7 +985,10 @@ private struct ControlsView: View {
                 Picker("操作", selection: $setting) {
                     ForEach(ScooterSetting.allCases) { Text($0.rawValue).tag($0) }
                 }
-                Button("发送设置") { device.apply(setting) }.disabled(!device.isReady || device.isBusy)
+                Button("发送设置") {
+                    Task { await device.applyWithOwnerAuthentication(setting) }
+                }
+                .disabled(!device.isReady || device.isBusy)
             }
             Section("滑板车电源") {
                 Button("开机") { pendingPower = true }.disabled(!device.isReady || device.isBusy)
@@ -1008,13 +1015,20 @@ private struct ControlsView: View {
                 Stepper("中速：\(mediumSpeed)", value: $mediumSpeed, in: 1...100)
                 Stepper("高速：\(highSpeed)", value: $highSpeed, in: 1...100)
                 Button("发送高级参数") {
-                    device.applySettings2(persist: persistSettings, cruise: cruise, startMode: startMode,
-                                          low: lowSpeed, medium: mediumSpeed, high: highSpeed)
+                    Task {
+                        await device.applySettings2WithOwnerAuthentication(
+                            persist: persistSettings, cruise: cruise, startMode: startMode,
+                            low: lowSpeed, medium: mediumSpeed, high: highSpeed
+                        )
+                    }
                 }
                 .disabled(!device.isReady || device.isBusy)
             }
             Section("RFID 与旧数据") {
-                Button("登记 RFID 卡") { device.startRFIDRegistration() }.disabled(!device.isReady || device.isBusy)
+                Button("登记 RFID 卡") {
+                    Task { await device.startRFIDRegistrationWithOwnerAuthentication() }
+                }
+                .disabled(!device.isReady || device.isBusy)
                 Button("读取未上传骑行数据") { device.requestOldRideData() }.disabled(!device.isReady)
                 if !device.oldRideDataHex.isEmpty {
                     Text(device.oldRideDataHex).font(.caption.monospaced()).textSelection(.enabled)
@@ -1022,18 +1036,25 @@ private struct ControlsView: View {
                 Button("清除未上传骑行数据", role: .destructive) { showClearConfirmation = true }
                     .disabled(!device.isReady || device.isBusy)
             }
+            if !device.operationMessage.isEmpty {
+                Section("状态") { Text(device.operationMessage).foregroundStyle(.secondary) }
+            }
         }
         .navigationTitle("设备控制")
         .alert("确认滑板车电源操作", isPresented: Binding(get: { pendingPower != nil }, set: { if !$0 { pendingPower = nil } })) {
             Button("取消", role: .cancel) { pendingPower = nil }
             Button("确认", role: pendingPower == false ? .destructive : nil) {
-                if let pendingPower { device.setScooterPower(on: pendingPower) }
+                if let pendingPower {
+                    Task { await device.setScooterPowerWithOwnerAuthentication(on: pendingPower) }
+                }
                 pendingPower = nil
             }
         }
         .alert("清除旧骑行数据？", isPresented: $showClearConfirmation) {
             Button("取消", role: .cancel) { }
-            Button("永久清除", role: .destructive) { device.clearOldRideData() }
+            Button("永久清除", role: .destructive) {
+                Task { await device.clearOldRideDataWithOwnerAuthentication() }
+            }
         } message: { Text("此操作无法撤销，请先读取并确认数据。") }
     }
 }
@@ -1084,6 +1105,9 @@ private struct MaintenanceView: View {
             if !device.maintenanceKeyStored {
                 Section { Label("先在“安全”页保存 4 字节维护密钥", systemImage: "key") }
             }
+            if !device.operationMessage.isEmpty {
+                Section("状态") { Text(device.operationMessage).foregroundStyle(.secondary) }
+            }
         }
         .navigationTitle("维护")
         .onAppear {
@@ -1118,16 +1142,20 @@ private struct MaintenanceView: View {
     private func executePendingAction() {
         let action = pendingAction
         pendingAction = nil
-        do {
+        Task {
             switch action {
-            case .server: try device.modifyServer(ip: serverIP, port: serverPort)
-            case .apn: try device.modifyAPN(apn: apn, user: apnUser, password: apnPassword)
+            case .server:
+                await device.modifyServerWithOwnerAuthentication(ip: serverIP, port: serverPort)
+            case .apn:
+                await device.modifyAPNWithOwnerAuthentication(
+                    apn: apn, user: apnUser, password: apnPassword
+                )
             case .ota:
                 guard let firmwareData else { return }
-                try device.startOTA(fileData: firmwareData)
+                await device.startOTAWithOwnerAuthentication(fileData: firmwareData)
             case nil: break
             }
-        } catch { report(error) }
+        }
     }
 
     private func report(_ error: Error) {
@@ -1152,7 +1180,9 @@ private struct SecurityAndLogView: View {
                 if device.deviceKeyStored {
                     Label("已保存在仅限本机的 iOS Keychain", systemImage: "checkmark.shield")
                         .font(.footnote).foregroundStyle(.green)
-                    Button("删除设备密钥", role: .destructive) { device.deleteDeviceKey() }
+                    Button("删除设备密钥", role: .destructive) {
+                        Task { await device.deleteDeviceKeyWithOwnerAuthentication() }
+                    }
                 }
             }
             Section("维护密钥") {
@@ -1160,7 +1190,9 @@ private struct SecurityAndLogView: View {
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button(device.maintenanceKeyStored ? "更新维护密钥" : "保存维护密钥") { saveMaintenanceKey() }
                 if device.maintenanceKeyStored {
-                    Button("删除维护密钥", role: .destructive) { device.deleteMaintenanceKey() }
+                    Button("删除维护密钥", role: .destructive) {
+                        Task { await device.deleteMaintenanceKeyWithOwnerAuthentication() }
+                    }
                 }
             }
             Section("现场日志") {
@@ -1174,19 +1206,30 @@ private struct SecurityAndLogView: View {
                     }
                 }
             }
+            if !device.operationMessage.isEmpty {
+                Section("状态") { Text(device.operationMessage).foregroundStyle(.secondary) }
+            }
         }
         .navigationTitle("安全与日志")
         .alert("无法保存", isPresented: $showAlert) { Button("好") { } } message: { Text(alertMessage) }
     }
 
     private func saveDeviceKey() {
-        do { try device.saveDeviceKey(deviceKey); deviceKey = "" }
-        catch { report(error) }
+        let value = deviceKey
+        Task {
+            if await device.saveDeviceKeyWithOwnerAuthentication(value) {
+                deviceKey = ""
+            }
+        }
     }
 
     private func saveMaintenanceKey() {
-        do { try device.saveMaintenanceKey(maintenanceKey); maintenanceKey = "" }
-        catch { report(error) }
+        let value = maintenanceKey
+        Task {
+            if await device.saveMaintenanceKeyWithOwnerAuthentication(value) {
+                maintenanceKey = ""
+            }
+        }
     }
 
     private func report(_ error: Error) {

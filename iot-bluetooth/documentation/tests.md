@@ -5,6 +5,7 @@
 | 范围 | 命令 | 当前覆盖 |
 | --- | --- | --- |
 | 远程服务 | `cd ../iot-remote && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 77 项，覆盖签名、BLE 状态同步、BLE 事件幂等、时效、冲突与离线下行抑制、数据库、D0 转换与去重、定位质量、物理关锁后的 D1 门禁、新会话协调、布防告警、骑行生命周期、历史与保留清理、活动告警事件保留、精确能力目录、统一审计、敏感明细读取、设备会话替换与计数、自然断线闭合、隐私摘要、命令状态机、通信静默、部署版本读回、加密恢复副本，以及真实活动 TCP 设备连接下的优雅停机 |
+| iOS 源码守卫 | `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 4 项，固定 Build 号、外部锁无发送入口、BLE 高风险原始写方法私有，以及页面只能调用设备所有者验证入口 |
 | iOS 编译 | `xcodebuild -project IoTBluetooth.xcodeproj -scheme IoTBluetooth -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build` | Swift 类型检查、资源和工程配置 |
 
 iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 CoreBluetooth、Face ID、真机网络或车辆物理动作正确。
@@ -34,6 +35,8 @@ Build 16 在本机、远端发布目录和线上目录通过 69 项测试，并�
 最终需求对照修正外部锁反例。服务端 `wheel_lock` 和 App `ble.81` 必须标记为“危险维护”和“因果未确认”，不能因为 L5 与 BLE 0x81 无回包就标记为“不适用”。维护页只保留禁用说明，不存在可触发 `operateExternalLock` 的按钮或确认弹窗；自动测试固定服务端标签、禁用原因和精确能力 ID，iOS 编译固定 App 数据结构和禁用页面。
 
 Build 18 完成无签名与签名真机目标编译，安装到唯一已配对且启用开发者模式的 iPhone，读回版本 1.0、Build 18 并成功启动。设备选择、安装、查询和启动输出均被收敛为计数与结果，不在验收记录中保留设备标识。该证据证明禁用边界可编译并能被系统加载，不替代页面文字的人工检查。
+
+Build 19 将 BLE 开关锁、车辆设置、RFID、电源、旧数据清理、服务器、APN、OTA、设备密钥和维护密钥写操作统一收口到 `deviceOwnerAuthentication`。原始写方法改为私有，页面只调用带 `WithOwnerAuthentication` 后缀的公开入口。4 项源码守卫与无签名通用 iOS 编译已通过，签名安装和身份验证弹窗的人机交互仍按不同证据层分别记录。
 
 ## 已完成实车验收
 

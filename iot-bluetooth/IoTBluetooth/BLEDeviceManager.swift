@@ -1,5 +1,6 @@
 import Foundation
 import CoreBluetooth
+import LocalAuthentication
 
 final class BLEDeviceManager: NSObject, ObservableObject {
     @Published private(set) var phase: ConnectionPhase = .idle
@@ -72,7 +73,31 @@ final class BLEDeviceManager: NSObject, ObservableObject {
 
     var isReady: Bool { phase == .ready && isAuthenticated }
 
-    func saveDeviceKey(_ key: String) throws {
+    func saveDeviceKeyWithOwnerAuthentication(_ key: String) async -> Bool {
+        await performAuthorized("确认保存或更新车辆蓝牙密钥") {
+            try self.saveDeviceKey(key)
+        }
+    }
+
+    func deleteDeviceKeyWithOwnerAuthentication() async {
+        await performAuthorized("确认删除车辆蓝牙密钥") {
+            self.deleteDeviceKey()
+        }
+    }
+
+    func saveMaintenanceKeyWithOwnerAuthentication(_ key: String) async -> Bool {
+        await performAuthorized("确认保存或更新车辆维护密钥") {
+            try self.saveMaintenanceKey(key)
+        }
+    }
+
+    func deleteMaintenanceKeyWithOwnerAuthentication() async {
+        await performAuthorized("确认删除车辆维护密钥") {
+            self.deleteMaintenanceKey()
+        }
+    }
+
+    private func saveDeviceKey(_ key: String) throws {
         try validateDeviceKey(key)
         if DeviceKeyVault.read() == key {
             completeNoOp("设备密钥未变化，无需更新")
@@ -86,7 +111,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         appendEvent("安全", isUpdate ? "设备密钥已更新到本机 Keychain" : "设备密钥已保存到本机 Keychain")
     }
 
-    func deleteDeviceKey() {
+    private func deleteDeviceKey() {
         disconnect(manual: true)
         DeviceKeyVault.delete()
         refreshDeviceKeyState()
@@ -94,7 +119,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         appendEvent("安全", "设备密钥已从 Keychain 删除")
     }
 
-    func saveMaintenanceKey(_ key: String) throws {
+    private func saveMaintenanceKey(_ key: String) throws {
         guard key.utf8.count == 4, key.unicodeScalars.allSatisfy({ $0.isASCII }) else {
             throw NSError(domain: "IoTBluetooth", code: 1, userInfo: [NSLocalizedDescriptionKey: "维护密钥必须为 4 个 ASCII 字节"])
         }
@@ -107,7 +132,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         appendEvent("安全", "维护密钥已保存到本机 Keychain")
     }
 
-    func deleteMaintenanceKey() {
+    private func deleteMaintenanceKey() {
         KeychainStore.delete(account: "maintenance-key")
         maintenanceKeyStored = false
         appendEvent("安全", "维护密钥已从 Keychain 删除")
@@ -149,7 +174,74 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    func unlock() {
+    func unlockWithOwnerAuthentication() async {
+        await performAuthorized("确认附近蓝牙开锁") {
+            self.unlock()
+        }
+    }
+
+    func lockWithOwnerAuthentication() async {
+        await performAuthorized("确认附近蓝牙关锁") {
+            self.lock()
+        }
+    }
+
+    func applyWithOwnerAuthentication(_ setting: ScooterSetting) async {
+        await performAuthorized("确认修改车辆设置") {
+            self.apply(setting)
+        }
+    }
+
+    func applySettings2WithOwnerAuthentication(
+        persist: Bool, cruise: Int, startMode: Int, low: Int, medium: Int, high: Int
+    ) async {
+        await performAuthorized("确认修改车辆高级设置") {
+            self.applySettings2(
+                persist: persist, cruise: cruise, startMode: startMode,
+                low: low, medium: medium, high: high
+            )
+        }
+    }
+
+    func startRFIDRegistrationWithOwnerAuthentication() async {
+        await performAuthorized("确认登记 RFID 卡") {
+            self.startRFIDRegistration()
+        }
+    }
+
+    func setScooterPowerWithOwnerAuthentication(on: Bool) async {
+        await performAuthorized(on ? "确认打开车辆电源" : "确认关闭车辆电源") {
+            self.setScooterPower(on: on)
+        }
+    }
+
+    func clearOldRideDataWithOwnerAuthentication() async {
+        await performAuthorized("确认永久清除设备侧旧骑行数据") {
+            self.clearOldRideData()
+        }
+    }
+
+    func modifyServerWithOwnerAuthentication(ip: String, port: String) async {
+        await performAuthorized("确认修改车辆服务器配置") {
+            try self.modifyServer(ip: ip, port: port)
+        }
+    }
+
+    func modifyAPNWithOwnerAuthentication(
+        apn: String, user: String, password: String
+    ) async {
+        await performAuthorized("确认修改车辆 APN 配置") {
+            try self.modifyAPN(apn: apn, user: user, password: password)
+        }
+    }
+
+    func startOTAWithOwnerAuthentication(fileData: Data) async {
+        await performAuthorized("确认开始车辆固件升级") {
+            try self.startOTA(fileData: fileData)
+        }
+    }
+
+    private func unlock() {
         guardReady {
             guard snapshot.isLocked != false else {
                 completeNoOp("当前已开锁，无需重复操作")
@@ -168,7 +260,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    func lock() {
+    private func lock() {
         guardReady {
             guard snapshot.isLocked != true else {
                 completeNoOp("当前已关锁，无需重复操作")
@@ -184,7 +276,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    func apply(_ setting: ScooterSetting) {
+    private func apply(_ setting: ScooterSetting) {
         guardReady {
             if setting.matches(rideMode: snapshot.rideMode) {
                 completeNoOp("当前已经是\(setting.rawValue)，无需重复设置")
@@ -196,7 +288,8 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    func applySettings2(persist: Bool, cruise: Int, startMode: Int, low: Int, medium: Int, high: Int) {
+    private func applySettings2(persist: Bool, cruise: Int, startMode: Int,
+                                low: Int, medium: Int, high: Int) {
         guardReady {
             let payload = [persist ? 1 : 0, cruise, startMode, low, medium, high].map(UInt8.init)
             beginBusy("正在发送高级滑板车设置")
@@ -205,7 +298,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    func startRFIDRegistration() {
+    private func startRFIDRegistration() {
         guardReady {
             beginBusy("正在等待 RFID 卡", timeout: 30, timeoutMessage: "RFID 登记等待超时")
             send(.rfid, payload: [0x01])
@@ -213,7 +306,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    func setScooterPower(on: Bool) {
+    private func setScooterPower(on: Bool) {
         guardReady {
             beginBusy(on ? "正在开机" : "正在关机")
             send(.power, payload: [on ? 0x02 : 0x01])
@@ -229,7 +322,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    func clearOldRideData() {
+    private func clearOldRideData() {
         guardReady {
             beginBusy("正在清除旧骑行数据")
             send(.clearRideData, payload: [0x01])
@@ -245,7 +338,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    func modifyServer(ip: String, port: String) throws {
+    private func modifyServer(ip: String, port: String) throws {
         guard !ip.isEmpty, UInt16(port) != nil else {
             throw NSError(domain: "IoTBluetooth", code: 2, userInfo: [NSLocalizedDescriptionKey: "服务器地址或端口格式不正确"])
         }
@@ -259,7 +352,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         try startConfigurationTransfer("IP:\(ip),PORT:\(port),IPMODE:1,")
     }
 
-    func modifyAPN(apn: String, user: String, password: String) throws {
+    private func modifyAPN(apn: String, user: String, password: String) throws {
         guard !apn.isEmpty else {
             throw NSError(domain: "IoTBluetooth", code: 3, userInfo: [NSLocalizedDescriptionKey: "APN 不能为空"])
         }
@@ -273,7 +366,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         try startConfigurationTransfer("APN:\(apn),USER:\(user),PW:\(password),")
     }
 
-    func startOTA(fileData: Data) throws {
+    private func startOTA(fileData: Data) throws {
         try guardReadyOrThrow()
         let verify = try maintenanceKeyBytes()
         guard !fileData.isEmpty else {
@@ -739,6 +832,39 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         systemReadActive = false
         deviceLogMode = false
         transferJob = nil
+    }
+
+    @discardableResult
+    private func performAuthorized(
+        _ reason: String, operation: () throws -> Void
+    ) async -> Bool {
+        do {
+            let context = LAContext()
+            var evaluationError: NSError?
+            guard context.canEvaluatePolicy(
+                .deviceOwnerAuthentication, error: &evaluationError
+            ) else {
+                throw evaluationError ?? NSError(
+                    domain: "IoTBluetooth", code: 6,
+                    userInfo: [NSLocalizedDescriptionKey: "设备所有者验证不可用"]
+                )
+            }
+            let accepted = try await context.evaluatePolicy(
+                .deviceOwnerAuthentication, localizedReason: reason
+            )
+            guard accepted else {
+                throw NSError(
+                    domain: "IoTBluetooth", code: 7,
+                    userInfo: [NSLocalizedDescriptionKey: "未通过设备所有者验证"]
+                )
+            }
+            try operation()
+            return true
+        } catch {
+            operationMessage = error.localizedDescription
+            appendEvent("安全", "高风险操作未执行")
+            return false
+        }
     }
 
     private func validateDeviceKey(_ key: String) throws {
