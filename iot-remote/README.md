@@ -37,4 +37,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 
 将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。切换时还要确认旧服务在 `TimeoutStopSec` 内以 `Result=success` 停止，不能把 systemd 强制杀死当成正常退出。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
 
+2026 年 8 月 22 日部署基线为 Git revision `2f3be25`。新 `emtb-iot-remote.service` 已通过远端 30 项测试、内部 readiness、公网 revision、未认证 API 401、数据库权限 600 和一次真实 `Result=success` 停启验证。旧服务 unit 与源码保留作为回滚材料，但已停止并禁用。旧版本在首次切换时触发过停止超时，因此其 `failed/timeout` 不能作为新版本停机质量的反证；新版本的优雅停机已单独验证。
+
 不得提交真实 IMEI、配对码、令牌、控制私钥、数据库、日志或服务器现场记录。
