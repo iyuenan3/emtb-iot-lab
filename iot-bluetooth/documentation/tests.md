@@ -4,7 +4,7 @@
 
 | 范围 | 命令 | 当前覆盖 |
 | --- | --- | --- |
-| 远程服务 | `cd ../iot-remote && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 49 项，覆盖签名、BLE 状态同步、数据库、D0 转换与去重、定位质量、D1、新会话协调、布防等待、W0 抑制和合并、D1 与 D0 串行、离线解除告警、活动告警期间重复关锁、位置与告警 API、命令状态机、通信静默、部署版本读回，以及真实活动 TCP 设备连接下的优雅停机 |
+| 远程服务 | `cd ../iot-remote && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 54 项，覆盖签名、BLE 状态同步、数据库、D0 转换与去重、定位质量、D1、新会话协调、布防告警、骑行生命周期、10 分钟轨迹缺口、历史与设置 API、7 天或 30 天整段清理、活动告警期间重复关锁、命令状态机、通信静默、部署版本读回，以及真实活动 TCP 设备连接下的优雅停机 |
 | iOS 编译 | `xcodebuild -project IoTBluetooth.xcodeproj -scheme IoTBluetooth -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build` | Swift 类型检查、资源和工程配置 |
 
 iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 CoreBluetooth、Face ID、真机网络或车辆物理动作正确。

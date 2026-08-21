@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 
 from iot_remote.crypto import GX, GY
@@ -100,11 +101,112 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("tracking_confirmed_at", columns)
         self.assertIn("grace_until", columns)
         self.assertIn("active_alarm_id", columns)
+        self.assertIn("active_trip_id", columns)
         self.assertIn("rejection_reason", location_columns)
         self.assertIn("distance_from_previous_m", location_columns)
         self.assertIn("speed_mps", location_columns)
         self.assertIn("alarm_id", location_columns)
+        self.assertIn("trip_id", location_columns)
         self.assertEqual(legacy_location[0], 1)
+
+    def test_trip_lifecycle_counts_points_and_breaks_long_gaps(self):
+        now = int(time.time())
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "unlocked", "test", now - 1000,
+            command_id="unlock-command",
+        )
+        trip_id = self.database.vehicle(self.vehicle_id)["active_trip_id"]
+        self.assertIsNotNone(trip_id)
+        base = {
+            "source": "tracking", "valid": True, "satellites": 6,
+            "hdop": 0.8, "altitude_m": 10.0, "mode": "A",
+        }
+        for timestamp, latitude, marker in (
+            (now - 900, 30.0, "first"),
+            (now - 840, 30.0001, "second"),
+            (now - 100, 30.0002, "after-gap"),
+        ):
+            point = self.database.save_location(
+                self.vehicle_id, device_timestamp=timestamp,
+                latitude=latitude, longitude=120.0,
+                raw_fields=("1", marker), **base,
+            )
+            self.assertEqual(point["trip_id"], trip_id)
+
+        active = self.database.trip(trip_id)
+        self.assertEqual(active["status"], "active")
+        self.assertEqual(active["point_count"], 3)
+        self.assertGreater(active["distance_m"], 10)
+        self.assertLess(active["distance_m"], 20)
+
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "test", now,
+            command_id="lock-command",
+        )
+        completed = self.database.trip(trip_id)
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["end_command_id"], "lock-command")
+        self.assertIsNone(self.database.vehicle(self.vehicle_id)["active_trip_id"])
+        self.assertEqual(len(self.database.trip_locations(self.vehicle_id, trip_id)), 3)
+
+    def test_retention_setting_shortening_applies_on_cleanup(self):
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "unlocked", "test", 100
+        )
+        old_trip_id = self.database.vehicle(self.vehicle_id)["active_trip_id"]
+        self.database.save_location(
+            self.vehicle_id, source="tracking", device_timestamp=100,
+            valid=True, latitude=30.0, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("old-trip",),
+        )
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "test", 200
+        )
+        ordinary = self.database.save_location(
+            self.vehicle_id, source="once", device_timestamp=300,
+            valid=True, latitude=30.0, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("ordinary",),
+        )
+        self.database.connection.execute(
+            "UPDATE locations SET received_at=100 WHERE id=?", (ordinary["id"],)
+        )
+        self.database.connection.commit()
+
+        expanded = self.database.set_location_history_days(self.vehicle_id, 30, now=300)
+        self.assertEqual(expanded["location_history_days"], 30)
+        with self.assertRaises(PermissionError):
+            self.database.set_location_history_days(self.vehicle_id, 7, now=301)
+        pending = self.database.set_location_history_days(
+            self.vehicle_id, 7, confirm_shorten=True, now=302
+        )
+        self.assertEqual(pending["location_history_days"], 30)
+        self.assertEqual(pending["pending_location_history_days"], 7)
+
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "unlocked", "test", 400
+        )
+        active_trip_id = self.database.vehicle(self.vehicle_id)["active_trip_id"]
+        result = self.database.run_retention_cleanup(
+            self.vehicle_id, now=10 * 86400
+        )
+        self.assertEqual(result["history_days"], 7)
+        self.assertEqual(result["deleted_trips"], 1)
+        self.assertEqual(result["deleted_locations"], 2)
+        with self.assertRaises(KeyError):
+            self.database.trip(old_trip_id)
+        self.assertEqual(self.database.trip(active_trip_id)["status"], "active")
+        self.assertIsNone(
+            self.database.settings(self.vehicle_id)["pending_location_history_days"]
+        )
+        self.assertEqual(len(self.database.cleanup_events(self.vehicle_id)), 1)
+
+    def test_unlocked_state_recovers_missing_active_trip_after_restart(self):
+        self.database.update_vehicle_state(self.vehicle_id, lock_state="unlocked")
+        recovered = self.database.recover_active_trip_if_needed(self.vehicle_id, now=500)
+        repeated = self.database.recover_active_trip_if_needed(self.vehicle_id, now=600)
+        self.assertTrue(recovered["recovered_after_restart"])
+        self.assertEqual(recovered["id"], repeated["id"])
+        self.assertEqual(len(self.database.trips(self.vehicle_id)), 1)
 
     def test_grace_suppresses_movement_then_arms_and_merges_alarm(self):
         self.database.apply_confirmed_lock_state(

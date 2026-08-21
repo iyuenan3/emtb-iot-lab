@@ -108,6 +108,8 @@ Build 9 当前实现路径为 `GET /api/v1/locations?limit=500&since=<UTC秒>`�
 
 Build 10 当前实现 `POST /api/v1/ble-observations`。请求必须使用配对客户端的 P-256 私钥签名，只接受 24 小时内的 `locked` 或 `unlocked` 观察。观察 UUID 保证幂等，只有时间不早于服务器现有锁状态时才更新快照。该接口不创建命令、不发送 TCP 帧。
 
+Build 13 已实现 `GET /api/v1/trips`、`GET /api/v1/trips/{trip_id}`、`GET /api/v1/settings` 和签名的 `PUT /api/v1/settings/location-history`。保留期只接受 7 或 30，缩短到 7 天必须携带确认字段，并在下一次每日清理时生效。
+
 `GET /capabilities` 的每项至少包含 `capability_id`、中文名称、协议编号、通道、参数模式、风险等级、证据等级、是否可执行和禁用原因。App 与本地 BLE 能力目录按 `capability_id` 合并，但不能由服务端文本动态生成未经审核的操作按钮。
 
 ## 6. 控制接口

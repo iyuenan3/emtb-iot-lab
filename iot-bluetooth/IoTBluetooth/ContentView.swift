@@ -574,8 +574,33 @@ private struct ActivityView: View {
                     }
                 }
             }
-            Section("骑行与告警") {
-                Label("轨迹历史尚未实现", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+            Section("骑行记录") {
+                if remote.trips.isEmpty {
+                    Label("暂无骑行记录", systemImage: "bicycle")
+                } else {
+                    ForEach(remote.trips) { trip in
+                        NavigationLink { TripDetailView(trip: trip) } label: {
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    Label(
+                                        trip.status == "active" ? "当前骑行" : "历史骑行",
+                                        systemImage: trip.status == "active" ? "bicycle.circle.fill" : "point.topleft.down.to.point.bottomright.curvepath"
+                                    )
+                                    Spacer()
+                                    Text(String(format: "%.2f 公里", trip.distanceM / 1000))
+                                        .font(.caption.bold())
+                                }
+                                Text(Date(timeIntervalSince1970: TimeInterval(trip.startedAt)).formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Text("可靠定位点 \(trip.pointCount) 个")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 3)
+                        }
+                    }
+                }
+            }
+            Section("告警记录") {
                 if remote.alarms.isEmpty {
                     Label("暂无告警记录", systemImage: "checkmark.shield")
                 } else {
@@ -631,6 +656,121 @@ private struct ActivityView: View {
     }
 }
 
+private struct TripDetailView: View {
+    @EnvironmentObject private var remote: RemoteControlManager
+    let trip: RemoteTrip
+    @State private var camera: MapCameraPosition = .automatic
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                if points.isEmpty {
+                    ContentUnavailableView(
+                        "没有可靠轨迹点", systemImage: "location.slash",
+                        description: Text("无效点和被漂移规则过滤的点不会连线。")
+                    )
+                    .frame(minHeight: 260)
+                } else {
+                    Map(position: $camera) {
+                        ForEach(Array(routeSegments.enumerated()), id: \.offset) { _, segment in
+                            if segment.count > 1 {
+                                MapPolyline(coordinates: segment)
+                                    .stroke(.indigo, lineWidth: 4)
+                            }
+                        }
+                        if let first = coordinates.first {
+                            Marker("起点", systemImage: "flag.fill", coordinate: first).tint(.green)
+                        }
+                        if let last = coordinates.last {
+                            Marker("终点", systemImage: "flag.checkered", coordinate: last).tint(.indigo)
+                        }
+                    }
+                    .mapStyle(.standard(elevation: .realistic))
+                    .frame(height: 390)
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    LabeledContent("开始", value: date(trip.startedAt))
+                    LabeledContent("结束", value: trip.endedAt.map(date) ?? "进行中")
+                    LabeledContent("估算距离", value: String(format: "%.2f 公里", trip.distanceM / 1000))
+                    LabeledContent("可靠定位点", value: "\(trip.pointCount)")
+                    if trip.recoveredAfterRestart {
+                        Label("服务重启后依据开锁状态恢复，开始时间为恢复时间", systemImage: "arrow.clockwise")
+                            .font(.footnote).foregroundStyle(.orange)
+                    }
+                    Text("轨迹只使用车辆 IoT 定位。相邻可靠点超过 10 分钟时断线显示，不跨缺口估算距离。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+            }
+            .padding()
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle("骑行详情")
+        .task {
+            await remote.loadTrip(trip.id)
+            focusRoute()
+        }
+        .onChange(of: remote.selectedTripPoints.count) { _, _ in focusRoute() }
+    }
+
+    private var points: [RemoteLocation] {
+        remote.selectedTrip?.id == trip.id ? remote.selectedTripPoints : []
+    }
+
+    private var coordinates: [CLLocationCoordinate2D] {
+        points.compactMap { point in
+            guard let latitude = point.latitude, let longitude = point.longitude else { return nil }
+            return CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        }
+    }
+
+    private var routeSegments: [[CLLocationCoordinate2D]] {
+        var segments: [[CLLocationCoordinate2D]] = []
+        var current: [CLLocationCoordinate2D] = []
+        var previousTime: Int?
+        for point in points {
+            guard let latitude = point.latitude, let longitude = point.longitude else { continue }
+            let timestamp = point.deviceTimestamp ?? point.receivedAt
+            if let previousTime, timestamp - previousTime > 600, !current.isEmpty {
+                segments.append(current)
+                current = []
+            }
+            current.append(CLLocationCoordinate2D(latitude: latitude, longitude: longitude))
+            previousTime = timestamp
+        }
+        if !current.isEmpty { segments.append(current) }
+        return segments
+    }
+
+    private func focusRoute() {
+        guard let first = coordinates.first else { return }
+        let latitudes = coordinates.map(\.latitude)
+        let longitudes = coordinates.map(\.longitude)
+        let minLatitude = latitudes.min() ?? first.latitude
+        let maxLatitude = latitudes.max() ?? first.latitude
+        let minLongitude = longitudes.min() ?? first.longitude
+        let maxLongitude = longitudes.max() ?? first.longitude
+        camera = .region(MKCoordinateRegion(
+            center: CLLocationCoordinate2D(
+                latitude: (minLatitude + maxLatitude) / 2,
+                longitude: (minLongitude + maxLongitude) / 2
+            ),
+            span: MKCoordinateSpan(
+                latitudeDelta: max(0.008, (maxLatitude - minLatitude) * 1.4),
+                longitudeDelta: max(0.008, (maxLongitude - minLongitude) * 1.4)
+            )
+        ))
+    }
+
+    private func date(_ timestamp: Int) -> String {
+        Date(timeIntervalSince1970: TimeInterval(timestamp))
+            .formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
 private struct MoreView: View {
     var body: some View {
         List {
@@ -640,6 +780,7 @@ private struct MoreView: View {
                 NavigationLink { SecurityAndLogView() } label: { MoreRow("密钥与日志", icon: "lock.shield.fill", color: .green) }
             }
             Section("高级工具") {
+                NavigationLink { DataRetentionView() } label: { MoreRow("数据保留", icon: "externaldrive.fill", color: .teal) }
                 NavigationLink { ControlsView() } label: { MoreRow("设备控制", icon: "slider.horizontal.3", color: .orange) }
                 NavigationLink { MaintenanceView() } label: { MoreRow("设备维护", icon: "wrench.and.screwdriver.fill", color: .red) }
             }
@@ -657,6 +798,51 @@ private struct MoreView: View {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知"
         return "\(version) (\(build))"
+    }
+}
+
+private struct DataRetentionView: View {
+    @EnvironmentObject private var remote: RemoteControlManager
+    @State private var showShortenConfirmation = false
+
+    var body: some View {
+        Form {
+            Section("轨迹保留") {
+                LabeledContent("当前策略", value: "\(remote.settings?.locationHistoryDays ?? 7) 天")
+                if remote.settings?.pendingLocationHistoryDays == 7 {
+                    Label("已确认改为 7 天，将在下一次 03:30 清理时生效", systemImage: "clock.badge.checkmark")
+                        .foregroundStyle(.orange)
+                }
+                Button("保留 7 天") {
+                    if remote.settings?.locationHistoryDays == 30 {
+                        showShortenConfirmation = true
+                    }
+                }
+                .disabled(remote.isBusy || remote.settings?.locationHistoryDays == 7)
+                Button("保留 30 天") {
+                    Task { await remote.setLocationHistoryDays(30, confirmShortening: false) }
+                }
+                .disabled(remote.isBusy || remote.settings?.locationHistoryDays == 30
+                          && remote.settings?.pendingLocationHistoryDays == nil)
+            }
+            Section("清理规则") {
+                Text("已结束骑行按结束时间整体清理，避免留下半条轨迹。当前骑行不参与清理。")
+                Text("从 7 天改为 30 天立即生效，但不能恢复已经删除的数据。从 30 天改为 7 天需要确认，并在下一次清理时生效。")
+            }
+            if !remote.message.isEmpty {
+                Section { Text(remote.message).foregroundStyle(.secondary) }
+            }
+        }
+        .navigationTitle("数据保留")
+        .task { if remote.isPaired { await remote.refresh() } }
+        .alert("改为保留 7 天？", isPresented: $showShortenConfirmation) {
+            Button("取消", role: .cancel) { }
+            Button("确认缩短", role: .destructive) {
+                Task { await remote.setLocationHistoryDays(7, confirmShortening: true) }
+            }
+        } message: {
+            Text("下一次清理会删除超过 7 天的已结束骑行和普通定位，已删除数据无法恢复。")
+        }
     }
 }
 

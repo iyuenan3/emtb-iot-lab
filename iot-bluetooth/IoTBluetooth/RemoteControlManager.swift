@@ -19,6 +19,7 @@ struct RemoteVehicle: Decodable {
     let securityState: String
     let graceUntil: Int?
     let activeAlarmID: String?
+    let activeTripID: String?
     let desiredTrackingInterval: Int?
     let confirmedTrackingInterval: Int?
     let trackingConfirmedAt: Int?
@@ -38,6 +39,7 @@ struct RemoteVehicle: Decodable {
         case securityState = "security_state"
         case graceUntil = "grace_until"
         case activeAlarmID = "active_alarm_id"
+        case activeTripID = "active_trip_id"
         case desiredTrackingInterval = "desired_tracking_interval"
         case confirmedTrackingInterval = "confirmed_tracking_interval"
         case trackingConfirmedAt = "tracking_confirmed_at"
@@ -78,6 +80,35 @@ struct RemoteAlarm: Decodable, Identifiable {
         case triggerCount = "trigger_count"
         case acknowledgedAt = "acknowledged_at"
         case clearedAt = "cleared_at"
+    }
+}
+
+struct RemoteTrip: Decodable, Identifiable {
+    let id: String
+    let startedAt: Int
+    let endedAt: Int?
+    let status: String
+    let recoveredAfterRestart: Bool
+    let pointCount: Int
+    let distanceM: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id, status
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+        case recoveredAfterRestart = "recovered_after_restart"
+        case pointCount = "point_count"
+        case distanceM = "distance_m"
+    }
+}
+
+struct RemoteSettings: Decodable {
+    let locationHistoryDays: Int
+    let pendingLocationHistoryDays: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case locationHistoryDays = "location_history_days"
+        case pendingLocationHistoryDays = "pending_location_history_days"
     }
 }
 
@@ -125,6 +156,7 @@ struct RemoteLocation: Decodable, Identifiable {
     let hdop: Double?
     let altitudeM: Double?
     let mode: String?
+    let tripID: String?
 
     enum CodingKeys: String, CodingKey {
         case id, source, valid, latitude, longitude, satellites, hdop, mode
@@ -133,6 +165,7 @@ struct RemoteLocation: Decodable, Identifiable {
         case deviceTimestamp = "device_timestamp"
         case receivedAt = "received_at"
         case altitudeM = "altitude_m"
+        case tripID = "trip_id"
     }
 }
 
@@ -178,6 +211,10 @@ final class RemoteControlManager: ObservableObject {
     @Published private(set) var capabilities: [String: RemoteCapability] = [:]
     @Published private(set) var commands: [RemoteCommand] = []
     @Published private(set) var alarms: [RemoteAlarm] = []
+    @Published private(set) var trips: [RemoteTrip] = []
+    @Published private(set) var selectedTrip: RemoteTrip?
+    @Published private(set) var selectedTripPoints: [RemoteLocation] = []
+    @Published private(set) var settings: RemoteSettings?
     @Published private(set) var latestLocation: RemoteLocation?
     @Published private(set) var lastLocationReport: RemoteLocation?
     @Published private(set) var locations: [RemoteLocation] = []
@@ -299,12 +336,58 @@ final class RemoteControlManager: ObservableObject {
         }
     }
 
+    func loadTrip(_ tripID: String) async {
+        guard isPaired else { return }
+        await perform {
+            let response = try await self.request(path: "/api/v1/trips/\(tripID)")
+            guard let tripObject = response["trip"], let pointObject = response["points"] else {
+                throw RemoteError.message("远程服务响应缺少骑行详情")
+            }
+            let decoder = JSONDecoder()
+            self.selectedTrip = try decoder.decode(
+                RemoteTrip.self,
+                from: JSONSerialization.data(withJSONObject: tripObject)
+            )
+            self.selectedTripPoints = try decoder.decode(
+                [RemoteLocation].self,
+                from: JSONSerialization.data(withJSONObject: pointObject)
+            )
+        }
+    }
+
+    func setLocationHistoryDays(_ days: Int, confirmShortening: Bool) async {
+        guard isPaired else { return }
+        await perform {
+            let response = try await self.request(
+                path: "/api/v1/settings/location-history", method: "PUT",
+                body: ["days": days, "confirm_shorten": confirmShortening],
+                signed: true, idempotencyKey: UUID().uuidString.lowercased()
+            )
+            guard let settingsObject = response["settings"] else {
+                throw RemoteError.message("远程服务响应缺少保留设置")
+            }
+            self.settings = try JSONDecoder().decode(
+                RemoteSettings.self,
+                from: JSONSerialization.data(withJSONObject: settingsObject)
+            )
+            if self.settings?.pendingLocationHistoryDays == 7 {
+                self.message = "已确认改为 7 天，将在下一次清理时生效"
+            } else {
+                self.message = "轨迹保留期已更新为 \(days) 天"
+            }
+        }
+    }
+
     func clearPairing() {
         RemoteCredentialVault.clearPairing()
         vehicle = nil
         capabilities = [:]
         commands = []
         alarms = []
+        trips = []
+        selectedTrip = nil
+        selectedTripPoints = []
+        settings = nil
         latestLocation = nil
         lastLocationReport = nil
         locations = []
@@ -357,6 +440,24 @@ final class RemoteControlManager: ObservableObject {
                 )
                 alarms = loaded
                 notifyForNewestActiveAlarm(loaded)
+            }
+        } catch { }
+        do {
+            let tripResponse = try await request(path: "/api/v1/trips?limit=100")
+            if let tripObject = tripResponse["trips"] {
+                trips = try decoder.decode(
+                    [RemoteTrip].self,
+                    from: JSONSerialization.data(withJSONObject: tripObject)
+                )
+            }
+        } catch { }
+        do {
+            let settingsResponse = try await request(path: "/api/v1/settings")
+            if let settingsObject = settingsResponse["settings"] {
+                settings = try decoder.decode(
+                    RemoteSettings.self,
+                    from: JSONSerialization.data(withJSONObject: settingsObject)
+                )
             }
         } catch { }
         do {

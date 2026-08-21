@@ -7,8 +7,10 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, time as datetime_time, timedelta
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
 
 from .crypto import canonical_request, decode_base64, sha256_hex, verify_p256_raw
 from .database import Database
@@ -87,6 +89,7 @@ class RemoteService:
         self._pairing_failures: list[float] = []
         self._policy_reconcile_pending = False
         self._grace_task: Optional[asyncio.Task[None]] = None
+        self._cleanup_task: Optional[asyncio.Task[None]] = None
         self._alarm_workflow: Optional[dict[str, str]] = None
         self.database.mark_inflight_unknown()
 
@@ -109,6 +112,10 @@ class RemoteService:
         return max(0, int(time.monotonic() - self.session.last_frame_at))
 
     async def shutdown(self) -> None:
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            await asyncio.gather(self._cleanup_task, return_exceptions=True)
+            self._cleanup_task = None
         if self._grace_task:
             self._grace_task.cancel()
             await asyncio.gather(self._grace_task, return_exceptions=True)
@@ -204,6 +211,9 @@ class RemoteService:
             if fields[3].isdigit():
                 updates["battery_percent"] = int(fields[3])
             self.database.update_vehicle_state(self.vehicle_id, **updates)
+            self.database.reconcile_trip_for_lock_state(
+                self.vehicle_id, updates["lock_state"], state_time
+            )
             if self.session and not self.session.policy_reconciled:
                 self.session.policy_reconciled = True
                 reconcile_new_session = True
@@ -333,11 +343,12 @@ class RemoteService:
         if command_type == "vehicle.unlock":
             self.database.apply_confirmed_lock_state(
                 self.vehicle_id, "unlocked", "remote_command", int(time.time()),
-                parameters["user_id"], parameters["timestamp"],
+                parameters["user_id"], parameters["timestamp"], active["id"],
             )
         elif command_type == "vehicle.lock":
             self.database.apply_confirmed_lock_state(
-                self.vehicle_id, "locked", "remote_command", int(time.time())
+                self.vehicle_id, "locked", "remote_command", int(time.time()),
+                command_id=active["id"],
             )
         elif command_type == "tracking.set_policy":
             self.database.update_vehicle_state(
@@ -372,7 +383,33 @@ class RemoteService:
 
     async def start_background_tasks(self) -> None:
         self.database.arm_if_grace_expired(self.vehicle_id)
+        self.database.recover_active_trip_if_needed(self.vehicle_id)
         self._schedule_grace_timer()
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(self._retention_cleanup_loop())
+
+    async def _retention_cleanup_loop(self) -> None:
+        timezone = ZoneInfo("Asia/Shanghai")
+        try:
+            while True:
+                now = datetime.now(timezone)
+                next_run = datetime.combine(
+                    now.date(), datetime_time(hour=3, minute=30), timezone
+                )
+                if next_run <= now:
+                    next_run += timedelta(days=1)
+                await asyncio.sleep((next_run - now).total_seconds())
+                try:
+                    result = self.database.run_retention_cleanup(self.vehicle_id)
+                    LOGGER.info(
+                        "retention cleanup completed trips=%s locations=%s days=%s",
+                        result["deleted_trips"], result["deleted_locations"],
+                        result["history_days"],
+                    )
+                except Exception:
+                    LOGGER.exception("retention cleanup failed")
+        except asyncio.CancelledError:
+            pass
 
     def _schedule_grace_timer(self) -> None:
         if self._grace_task:
@@ -730,6 +767,28 @@ class RemoteService:
                 "last_report": self.database.latest_location(self.vehicle_id, valid_only=False),
                 "points": self.database.locations(self.vehicle_id, limit=limit, since=since),
             }, 200
+        if request.method == "GET" and request.path == "/api/v1/trips":
+            query = parse_qs(request.query, keep_blank_values=True)
+            try:
+                limit = int(query.get("limit", ["100"])[0])
+            except ValueError:
+                raise APIError(400, "invalid_trip_query", "骑行查询参数无效")
+            if not 1 <= limit <= 500:
+                raise APIError(400, "invalid_trip_query", "骑行查询参数超出范围")
+            return {"trips": self.database.trips(self.vehicle_id, limit)}, 200
+        trip_prefix = "/api/v1/trips/"
+        if request.method == "GET" and request.path.startswith(trip_prefix):
+            trip_id = request.path[len(trip_prefix):]
+            try:
+                trip = self.database.trip(trip_id)
+            except KeyError:
+                raise APIError(404, "trip_not_found", "骑行记录不存在")
+            if trip["vehicle_id"] != self.vehicle_id:
+                raise APIError(404, "trip_not_found", "骑行记录不存在")
+            return {
+                "trip": trip,
+                "points": self.database.trip_locations(self.vehicle_id, trip_id),
+            }, 200
         if request.method == "GET" and request.path == "/api/v1/alarms":
             query = parse_qs(request.query, keep_blank_values=True)
             active_only = query.get("state", [""])[0] == "active"
@@ -738,6 +797,24 @@ class RemoteService:
                     self.vehicle_id, active_only=active_only
                 )
             }, 200
+        if request.method == "GET" and request.path == "/api/v1/settings":
+            return {"settings": self.database.settings(self.vehicle_id)}, 200
+        if (request.method == "PUT"
+                and request.path == "/api/v1/settings/location-history"):
+            self._verify_control_signature(request, client)
+            body = self._json(request)
+            days = body.get("days")
+            if not isinstance(days, int) or days not in {7, 30}:
+                raise APIError(422, "invalid_history_days", "轨迹保留期只支持 7 天或 30 天")
+            try:
+                settings = self.database.set_location_history_days(
+                    self.vehicle_id, days,
+                    confirm_shorten=body.get("confirm_shorten") is True,
+                )
+            except PermissionError:
+                raise APIError(422, "history_shorten_confirmation_required",
+                               "缩短轨迹保留期需要二次确认")
+            return {"settings": settings}, 200
         if request.method == "POST" and request.path == "/api/v1/ble-observations":
             self._verify_control_signature(request, client)
             body = self._json(request)

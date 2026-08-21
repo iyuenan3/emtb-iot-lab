@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS vehicle_state (
   telemetry_updated_at INTEGER, lock_state_source TEXT NOT NULL DEFAULT 'unknown',
   lock_state_updated_at INTEGER, desired_tracking_interval INTEGER,
   confirmed_tracking_interval INTEGER, tracking_confirmed_at INTEGER,
-  grace_until INTEGER, active_alarm_id TEXT,
+  grace_until INTEGER, active_alarm_id TEXT, active_trip_id TEXT,
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pairing_codes (
@@ -54,6 +54,15 @@ CREATE TABLE IF NOT EXISTS command_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL REFERENCES commands(id),
   status TEXT NOT NULL, detail_json TEXT NOT NULL, created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS trips (
+  id TEXT PRIMARY KEY, vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  started_at INTEGER NOT NULL, ended_at INTEGER, start_command_id TEXT,
+  end_command_id TEXT, status TEXT NOT NULL, recovered_after_restart INTEGER NOT NULL DEFAULT 0,
+  point_count INTEGER NOT NULL DEFAULT 0, distance_m REAL NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS trips_active_vehicle
+  ON trips(vehicle_id) WHERE status='active';
 CREATE TABLE IF NOT EXISTS locations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   vehicle_id TEXT NOT NULL REFERENCES vehicles(id), source TEXT NOT NULL,
@@ -61,6 +70,7 @@ CREATE TABLE IF NOT EXISTS locations (
   latitude REAL, longitude REAL, satellites INTEGER, hdop REAL, altitude_m REAL,
   mode TEXT, display_eligible INTEGER NOT NULL DEFAULT 0, rejection_reason TEXT,
   distance_from_previous_m REAL, speed_mps REAL, alarm_id TEXT,
+  trip_id TEXT REFERENCES trips(id),
   raw_fields_json TEXT NOT NULL, fingerprint TEXT NOT NULL,
   UNIQUE(vehicle_id, fingerprint)
 );
@@ -88,6 +98,17 @@ CREATE TABLE IF NOT EXISTS alarm_events (
 );
 CREATE INDEX IF NOT EXISTS alarm_events_vehicle_time
   ON alarm_events(vehicle_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS settings (
+  vehicle_id TEXT PRIMARY KEY REFERENCES vehicles(id),
+  location_history_days INTEGER NOT NULL DEFAULT 7,
+  pending_location_history_days INTEGER,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cleanup_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  history_days INTEGER NOT NULL, deleted_trips INTEGER NOT NULL,
+  deleted_locations INTEGER NOT NULL, created_at INTEGER NOT NULL
+);
 """
 
 
@@ -137,6 +158,8 @@ class Database:
             self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN grace_until INTEGER")
         if "active_alarm_id" not in columns:
             self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN active_alarm_id TEXT")
+        if "active_trip_id" not in columns:
+            self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN active_trip_id TEXT")
 
     def _migrate_locations(self) -> None:
         columns = {
@@ -159,6 +182,12 @@ class Database:
             self.connection.execute("ALTER TABLE locations ADD COLUMN speed_mps REAL")
         if "alarm_id" not in columns:
             self.connection.execute("ALTER TABLE locations ADD COLUMN alarm_id TEXT")
+        if "trip_id" not in columns:
+            self.connection.execute("ALTER TABLE locations ADD COLUMN trip_id TEXT")
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS locations_trip_time "
+            "ON locations(trip_id, received_at) WHERE trip_id IS NOT NULL"
+        )
 
     def close(self) -> None:
         self.connection.close()
@@ -172,6 +201,10 @@ class Database:
         )
         self.connection.execute(
             "INSERT OR IGNORE INTO vehicle_state(vehicle_id, updated_at) VALUES(?,?)",
+            (vehicle_id, now),
+        )
+        self.connection.execute(
+            "INSERT OR IGNORE INTO settings(vehicle_id,updated_at) VALUES(?,?)",
             (vehicle_id, now),
         )
         self.connection.commit()
@@ -240,7 +273,7 @@ class Database:
             "telemetry_fields_json", "telemetry_updated_at", "lock_state_source",
             "lock_state_updated_at", "desired_tracking_interval",
             "confirmed_tracking_interval", "tracking_confirmed_at",
-            "grace_until", "active_alarm_id",
+            "grace_until", "active_alarm_id", "active_trip_id",
         }
         filtered = {key: value for key, value in values.items() if key in allowed}
         if not filtered:
@@ -256,7 +289,8 @@ class Database:
     def apply_confirmed_lock_state(self, vehicle_id: str, lock_state: str,
                                    source: str, updated_at: int,
                                    unlock_user: Optional[str] = None,
-                                   unlock_timestamp: Optional[str] = None) -> None:
+                                   unlock_timestamp: Optional[str] = None,
+                                   command_id: Optional[str] = None) -> None:
         if lock_state not in {"locked", "unlocked"}:
             raise ValueError("锁状态无效")
         with self.connection:
@@ -281,7 +315,11 @@ class Database:
                     self._insert_alarm_event(
                         vehicle_id, alarm["id"], "cleared_by_unlock", {}, updated_at
                     )
+                self._ensure_active_trip(
+                    vehicle_id, updated_at, command_id, recovered_after_restart=False
+                )
             else:
+                self._finish_active_trip(vehicle_id, updated_at, command_id)
                 self.connection.execute(
                     "UPDATE vehicle_state SET lock_state='locked',"
                     "security_state=CASE WHEN active_alarm_id IS NULL "
@@ -290,6 +328,112 @@ class Database:
                     "WHERE vehicle_id=?",
                     (source, updated_at, updated_at, vehicle_id),
                 )
+
+    def _ensure_active_trip(self, vehicle_id: str, started_at: int,
+                            command_id: Optional[str],
+                            recovered_after_restart: bool) -> str:
+        state = self.connection.execute(
+            "SELECT active_trip_id FROM vehicle_state WHERE vehicle_id=?", (vehicle_id,)
+        ).fetchone()
+        if state is None:
+            raise KeyError(vehicle_id)
+        if state["active_trip_id"]:
+            return state["active_trip_id"]
+        existing = self.connection.execute(
+            "SELECT id FROM trips WHERE vehicle_id=? AND status='active'",
+            (vehicle_id,),
+        ).fetchone()
+        trip_id = existing["id"] if existing else str(uuid.uuid4())
+        if existing is None:
+            self.connection.execute(
+                "INSERT INTO trips(id,vehicle_id,started_at,start_command_id,status,"
+                "recovered_after_restart,updated_at) VALUES(?,?,?,?,'active',?,?)",
+                (trip_id, vehicle_id, started_at, command_id,
+                 int(recovered_after_restart), started_at),
+            )
+        self.connection.execute(
+            "UPDATE vehicle_state SET active_trip_id=?,updated_at=? WHERE vehicle_id=?",
+            (trip_id, started_at, vehicle_id),
+        )
+        return trip_id
+
+    def _finish_active_trip(self, vehicle_id: str, ended_at: int,
+                            command_id: Optional[str]) -> Optional[str]:
+        state = self.connection.execute(
+            "SELECT active_trip_id FROM vehicle_state WHERE vehicle_id=?", (vehicle_id,)
+        ).fetchone()
+        if state is None:
+            raise KeyError(vehicle_id)
+        trip_id = state["active_trip_id"]
+        if trip_id is None:
+            return None
+        self.connection.execute(
+            "UPDATE trips SET ended_at=?,end_command_id=?,status='completed',updated_at=? "
+            "WHERE id=? AND status='active'",
+            (ended_at, command_id, ended_at, trip_id),
+        )
+        self.connection.execute(
+            "UPDATE vehicle_state SET active_trip_id=NULL,updated_at=? WHERE vehicle_id=?",
+            (ended_at, vehicle_id),
+        )
+        return trip_id
+
+    def recover_active_trip_if_needed(self, vehicle_id: str,
+                                      now: Optional[int] = None) -> Optional[dict[str, Any]]:
+        current_time = int(time.time()) if now is None else now
+        state = self.connection.execute(
+            "SELECT lock_state,active_trip_id FROM vehicle_state WHERE vehicle_id=?",
+            (vehicle_id,),
+        ).fetchone()
+        if state is None:
+            raise KeyError(vehicle_id)
+        if state["lock_state"] != "unlocked":
+            return None
+        with self.connection:
+            trip_id = self._ensure_active_trip(
+                vehicle_id, current_time, None, recovered_after_restart=True
+            )
+        return self.trip(trip_id)
+
+    def reconcile_trip_for_lock_state(self, vehicle_id: str, lock_state: str,
+                                      now: Optional[int] = None) -> Optional[dict[str, Any]]:
+        if lock_state not in {"locked", "unlocked"}:
+            raise ValueError("锁状态无效")
+        current_time = int(time.time()) if now is None else now
+        with self.connection:
+            if lock_state == "unlocked":
+                trip_id = self._ensure_active_trip(
+                    vehicle_id, current_time, None, recovered_after_restart=True
+                )
+            else:
+                trip_id = self._finish_active_trip(vehicle_id, current_time, None)
+        return self.trip(trip_id) if trip_id is not None else None
+
+    def trip(self, trip_id: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM trips WHERE id=?", (trip_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(trip_id)
+        return self._trip_dict(row)
+
+    def trips(self, vehicle_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM trips WHERE vehicle_id=? "
+            "ORDER BY started_at DESC LIMIT ?",
+            (vehicle_id, max(1, min(limit, 500))),
+        ).fetchall()
+        return [self._trip_dict(row) for row in rows]
+
+    def trip_locations(self, vehicle_id: str, trip_id: str,
+                       include_filtered: bool = False) -> list[dict[str, Any]]:
+        condition = "" if include_filtered else " AND valid=1 AND display_eligible=1"
+        rows = self.connection.execute(
+            "SELECT * FROM locations WHERE vehicle_id=? AND trip_id=?" + condition
+            + " ORDER BY COALESCE(device_timestamp,received_at),id",
+            (vehicle_id, trip_id),
+        ).fetchall()
+        return [self._location_dict(row) for row in rows]
 
     def start_lock_grace(self, vehicle_id: str, grace_seconds: int = 300,
                          now: Optional[int] = None) -> dict[str, Any]:
@@ -457,6 +601,110 @@ class Database:
             result.append(event)
         return result
 
+    def settings(self, vehicle_id: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM settings WHERE vehicle_id=?", (vehicle_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(vehicle_id)
+        return dict(row)
+
+    def set_location_history_days(self, vehicle_id: str, days: int,
+                                  confirm_shorten: bool = False,
+                                  now: Optional[int] = None) -> dict[str, Any]:
+        if days not in {7, 30}:
+            raise ValueError("轨迹保留天数无效")
+        current_time = int(time.time()) if now is None else now
+        current = self.settings(vehicle_id)
+        if current["location_history_days"] == 30 and days == 7:
+            if not confirm_shorten:
+                raise PermissionError("缩短轨迹保留期需要确认")
+            with self.connection:
+                self.connection.execute(
+                    "UPDATE settings SET pending_location_history_days=7,updated_at=? "
+                    "WHERE vehicle_id=?",
+                    (current_time, vehicle_id),
+                )
+        else:
+            with self.connection:
+                self.connection.execute(
+                    "UPDATE settings SET location_history_days=?,"
+                    "pending_location_history_days=NULL,updated_at=? WHERE vehicle_id=?",
+                    (days, current_time, vehicle_id),
+                )
+        return self.settings(vehicle_id)
+
+    def run_retention_cleanup(self, vehicle_id: str,
+                              now: Optional[int] = None) -> dict[str, int]:
+        current_time = int(time.time()) if now is None else now
+        with self.connection:
+            setting = self.connection.execute(
+                "SELECT location_history_days,pending_location_history_days "
+                "FROM settings WHERE vehicle_id=?",
+                (vehicle_id,),
+            ).fetchone()
+            if setting is None:
+                raise KeyError(vehicle_id)
+            history_days = (
+                setting["pending_location_history_days"]
+                if setting["pending_location_history_days"] is not None
+                else setting["location_history_days"]
+            )
+            if setting["pending_location_history_days"] is not None:
+                self.connection.execute(
+                    "UPDATE settings SET location_history_days=?,"
+                    "pending_location_history_days=NULL,updated_at=? WHERE vehicle_id=?",
+                    (history_days, current_time, vehicle_id),
+                )
+            cutoff = current_time - history_days * 86400
+            deleted_trip_locations = self.connection.execute(
+                "SELECT COUNT(*) FROM locations WHERE trip_id IN "
+                "(SELECT id FROM trips WHERE vehicle_id=? AND status!='active' "
+                "AND ended_at IS NOT NULL AND ended_at<?)",
+                (vehicle_id, cutoff),
+            ).fetchone()[0]
+            deleted_trips = self.connection.execute(
+                "SELECT COUNT(*) FROM trips WHERE vehicle_id=? AND status!='active' "
+                "AND ended_at IS NOT NULL AND ended_at<?",
+                (vehicle_id, cutoff),
+            ).fetchone()[0]
+            self.connection.execute(
+                "DELETE FROM locations WHERE trip_id IN "
+                "(SELECT id FROM trips WHERE vehicle_id=? AND status!='active' "
+                "AND ended_at IS NOT NULL AND ended_at<?)",
+                (vehicle_id, cutoff),
+            )
+            self.connection.execute(
+                "DELETE FROM trips WHERE vehicle_id=? AND status!='active' "
+                "AND ended_at IS NOT NULL AND ended_at<?",
+                (vehicle_id, cutoff),
+            )
+            ordinary_locations = self.connection.execute(
+                "DELETE FROM locations WHERE vehicle_id=? AND trip_id IS NULL "
+                "AND received_at<?",
+                (vehicle_id, cutoff),
+            ).rowcount
+            deleted_locations = deleted_trip_locations + ordinary_locations
+            self.connection.execute(
+                "INSERT INTO cleanup_events(vehicle_id,history_days,deleted_trips,"
+                "deleted_locations,created_at) VALUES(?,?,?,?,?)",
+                (vehicle_id, history_days, deleted_trips,
+                 deleted_locations, current_time),
+            )
+        return {
+            "history_days": history_days,
+            "deleted_trips": deleted_trips,
+            "deleted_locations": deleted_locations,
+        }
+
+    def cleanup_events(self, vehicle_id: str,
+                       limit: int = 30) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM cleanup_events WHERE vehicle_id=? ORDER BY id DESC LIMIT ?",
+            (vehicle_id, max(1, min(limit, 100))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def _insert_alarm_event(self, vehicle_id: str, alarm_id: Optional[str],
                             event_type: str, detail: dict[str, Any],
                             created_at: int) -> None:
@@ -537,6 +785,10 @@ class Database:
         ).fetchone()
         if existing:
             return self._location_dict(existing)
+        state = self.connection.execute(
+            "SELECT active_trip_id FROM vehicle_state WHERE vehicle_id=?", (vehicle_id,)
+        ).fetchone()
+        trip_id = state["active_trip_id"] if state else None
         eligible, reason, distance, speed = self._location_quality(
             vehicle_id=vehicle_id,
             device_timestamp=device_timestamp,
@@ -550,16 +802,39 @@ class Database:
             max_hdop=max_hdop,
             max_speed_mps=max_speed_mps,
         )
+        trip_distance = 0.0
+        if eligible and trip_id is not None:
+            previous_trip_point = self.connection.execute(
+                "SELECT device_timestamp,latitude,longitude FROM locations "
+                "WHERE vehicle_id=? AND trip_id=? AND display_eligible=1 "
+                "AND device_timestamp IS NOT NULL AND latitude IS NOT NULL "
+                "AND longitude IS NOT NULL "
+                "ORDER BY device_timestamp DESC,id DESC LIMIT 1",
+                (vehicle_id, trip_id),
+            ).fetchone()
+            if previous_trip_point is not None and device_timestamp is not None:
+                elapsed = device_timestamp - previous_trip_point["device_timestamp"]
+                if 0 < elapsed <= 600:
+                    trip_distance = self._distance_m(
+                        previous_trip_point["latitude"], previous_trip_point["longitude"],
+                        latitude, longitude,
+                    )
         with self.connection:
-            self.connection.execute(
+            cursor = self.connection.execute(
                 "INSERT OR IGNORE INTO locations(vehicle_id,source,device_timestamp,received_at,"
                 "valid,latitude,longitude,satellites,hdop,altitude_m,mode,display_eligible,"
-                "rejection_reason,distance_from_previous_m,speed_mps,alarm_id,"
-                "raw_fields_json,fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "rejection_reason,distance_from_previous_m,speed_mps,alarm_id,trip_id,"
+                "raw_fields_json,fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (vehicle_id, source, device_timestamp, received_at, int(valid), latitude,
                  longitude, satellites, hdop, altitude_m, mode, int(eligible), reason,
-                 distance, speed, alarm_id, raw_json, fingerprint),
+                 distance, speed, alarm_id, trip_id, raw_json, fingerprint),
             )
+            if cursor.rowcount and eligible and trip_id is not None:
+                self.connection.execute(
+                    "UPDATE trips SET point_count=point_count+1,distance_m=distance_m+?,"
+                    "updated_at=? WHERE id=? AND status='active'",
+                    (trip_distance, received_at, trip_id),
+                )
         row = self.connection.execute(
             "SELECT * FROM locations WHERE vehicle_id=? AND fingerprint=?",
             (vehicle_id, fingerprint),
@@ -766,4 +1041,10 @@ class Database:
     def _alarm_dict(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["inferred"] = bool(result["inferred"])
+        return result
+
+    @staticmethod
+    def _trip_dict(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["recovered_after_restart"] = bool(result["recovered_after_restart"])
         return result

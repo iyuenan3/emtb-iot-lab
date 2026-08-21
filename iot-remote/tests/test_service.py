@@ -73,6 +73,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         if self.service._grace_task:
             self.service._grace_task.cancel()
             await asyncio.gather(self.service._grace_task, return_exceptions=True)
+        if self.service._cleanup_task:
+            self.service._cleanup_task.cancel()
+            await asyncio.gather(self.service._cleanup_task, return_exceptions=True)
         self.database.close()
         self.temp.cleanup()
 
@@ -100,6 +103,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         vehicle = self.database.vehicle(self.service.vehicle_id)
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(vehicle["lock_state"], "unlocked")
+        trip = self.database.trip(vehicle["active_trip_id"])
+        self.assertEqual(trip["start_command_id"], command["id"])
         self.assertEqual(vehicle["desired_tracking_interval"], 60)
         self.assertIn(b",D1,60#", self.writer.data)
 
@@ -120,7 +125,10 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.service.capabilities()["vehicle.lock"]["enabled"])
 
     async def test_lock_requires_r0_then_l1_and_physical_confirmation(self):
-        self.database.update_vehicle_state(self.service.vehicle_id, lock_state="unlocked")
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "unlocked", "test", int(time.time()) - 10
+        )
+        trip_id = self.database.vehicle(self.service.vehicle_id)["active_trip_id"]
         command = self.create("vehicle.lock", parameters={"stationary_confirmed": True})
         await self.service.dispatch_command(command["id"])
         self.assertIn(b",R0,1,30,", self.writer.data)
@@ -140,6 +148,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["result"]["physical_confirmation_required"])
         self.assertEqual(vehicle["lock_state"], "locked")
         self.assertEqual(vehicle["security_state"], "disarmed")
+        self.assertIsNone(vehicle["active_trip_id"])
+        self.assertEqual(self.database.trip(trip_id)["end_command_id"], command["id"])
         self.assertEqual(vehicle["desired_tracking_interval"], 3600)
         self.assertIn(b",D1,3600#", self.writer.data)
 
@@ -257,6 +267,26 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vehicle["battery_percent"], 99)
         self.assertEqual(vehicle["desired_tracking_interval"], 3600)
         self.assertIn(b",D1,3600#", self.writer.data)
+
+    async def test_h0_reconciles_recovered_trip_lifecycle(self):
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("0", "412", "31", "99", "0")
+        ))
+        vehicle = self.database.vehicle(self.service.vehicle_id)
+        trip_id = vehicle["active_trip_id"]
+        self.assertIsNotNone(trip_id)
+        self.assertTrue(self.database.trip(trip_id)["recovered_after_restart"])
+
+        active = self.database.active_command(self.service.vehicle_id)
+        if active:
+            self.service._finish(active["id"], "unknown", "test_cleanup")
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("1", "412", "31", "99", "0")
+        ))
+        self.assertIsNone(
+            self.database.vehicle(self.service.vehicle_id)["active_trip_id"]
+        )
+        self.assertEqual(self.database.trip(trip_id)["status"], "completed")
 
     async def test_d1_keeps_desired_and_confirmed_values_separate(self):
         command = self.create(
@@ -503,6 +533,69 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vehicle["security_state"], "armed")
         self.assertEqual(vehicle["desired_tracking_interval"], 3600)
         self.assertIsNone(self.database.active_command(self.service.vehicle_id))
+
+    async def test_trip_history_and_retention_settings_api(self):
+        now = int(time.time())
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "unlocked", "test", now - 120
+        )
+        trip_id = self.database.vehicle(self.service.vehicle_id)["active_trip_id"]
+        self.database.save_location(
+            self.service.vehicle_id, source="tracking", device_timestamp=now - 60,
+            valid=True, latitude=30.0, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("trip-api",),
+        )
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", now
+        )
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        code = self.database.create_pairing_code()
+        paired = self.database.complete_pairing(code, "iPhone", "token", public)
+        headers = {
+            "x-client-id": paired["client_id"],
+            "authorization": "Bearer token",
+        }
+
+        trips, status = await self.service.route(HTTPSpec(
+            "GET", "/api/v1/trips", "limit=10", headers, b"",
+        ))
+        self.assertEqual(status, 200)
+        self.assertEqual(trips["trips"][0]["id"], trip_id)
+        detail, status = await self.service.route(HTTPSpec(
+            "GET", f"/api/v1/trips/{trip_id}", "", headers, b"",
+        ))
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["trip"]["point_count"], 1)
+        self.assertEqual(len(detail["points"]), 1)
+        settings, status = await self.service.route(HTTPSpec(
+            "GET", "/api/v1/settings", "", headers, b"",
+        ))
+        self.assertEqual(status, 200)
+        self.assertEqual(settings["settings"]["location_history_days"], 7)
+
+        self.service._verify_control_signature = lambda request, client: None
+        expanded, status = await self.service.route(HTTPSpec(
+            "PUT", "/api/v1/settings/location-history", "", headers,
+            json.dumps({"days": 30}).encode(),
+        ))
+        self.assertEqual(status, 200)
+        self.assertEqual(expanded["settings"]["location_history_days"], 30)
+        with self.assertRaises(APIError) as context:
+            await self.service.route(HTTPSpec(
+                "PUT", "/api/v1/settings/location-history", "", headers,
+                json.dumps({"days": 7}).encode(),
+            ))
+        self.assertEqual(
+            context.exception.code, "history_shorten_confirmation_required"
+        )
+        shortened, status = await self.service.route(HTTPSpec(
+            "PUT", "/api/v1/settings/location-history", "", headers,
+            json.dumps({"days": 7, "confirm_shorten": True}).encode(),
+        ))
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            shortened["settings"]["pending_location_history_days"], 7
+        )
 
     async def test_connectivity_transitions_disable_commands(self):
         clock = asyncio.get_running_loop().time()
