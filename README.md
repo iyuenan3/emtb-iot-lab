@@ -70,7 +70,7 @@ cd ../iot-tcp-lab
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 ```
 
-当前代码基线包含 77 项远程服务测试和 16 项 TCP 工具测试。Build 18 修正外部锁危险诊断边界，线上服务在本轮累计部署前仍为 revision `05043e0`。代码存在或 App 能启动不等于所有硬件能力均已实车验收，具体状态见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
+当前代码基线包含 77 项远程服务测试和 16 项 TCP 工具测试。Build 18 修正外部锁危险诊断边界，并已完成无签名与签名编译、真机安装、版本读回和系统启动；线上服务在本轮累计部署前仍为 revision `05043e0`。代码存在或 App 能启动不等于所有硬件能力均已实车验收，具体状态见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
 
 ## 安全与隐私
 
