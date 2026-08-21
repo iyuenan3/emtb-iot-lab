@@ -64,7 +64,9 @@ class RemoteService:
                  location_min_satellites: int = 4,
                  location_max_hdop: float = 8.0,
                  location_max_speed_mps: float = 25.0,
-                 lock_grace_seconds: int = 300):
+                 lock_grace_seconds: int = 300,
+                 offline_movement_threshold_m: float = 200.0,
+                 offline_sample_max_separation_m: float = 75.0):
         if silence_window <= 0 or offline_window <= silence_window:
             raise ValueError("通信静默与离线阈值无效")
         if (location_min_satellites < 0 or location_max_hdop <= 0
@@ -72,6 +74,9 @@ class RemoteService:
             raise ValueError("定位质量阈值无效")
         if lock_grace_seconds <= 0:
             raise ValueError("布防等待时间无效")
+        if (offline_movement_threshold_m <= 0
+                or offline_sample_max_separation_m <= 0):
+            raise ValueError("离线移动阈值无效")
         self.database = database
         self.target_imei = target_imei
         self.vehicle_id = database.ensure_vehicle(target_imei, vehicle_name)
@@ -83,6 +88,8 @@ class RemoteService:
         self.location_max_hdop = location_max_hdop
         self.location_max_speed_mps = location_max_speed_mps
         self.lock_grace_seconds = lock_grace_seconds
+        self.offline_movement_threshold_m = offline_movement_threshold_m
+        self.offline_sample_max_separation_m = offline_sample_max_separation_m
         self.session: Optional[DeviceSession] = None
         self._session_lock = asyncio.Lock()
         self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
@@ -91,6 +98,7 @@ class RemoteService:
         self._grace_task: Optional[asyncio.Task[None]] = None
         self._cleanup_task: Optional[asyncio.Task[None]] = None
         self._alarm_workflow: Optional[dict[str, str]] = None
+        self._reconnect_workflow: Optional[dict[str, Any]] = None
         self.database.mark_inflight_unknown()
 
     def is_online(self) -> bool:
@@ -121,6 +129,11 @@ class RemoteService:
             await asyncio.gather(self._grace_task, return_exceptions=True)
             self._grace_task = None
         self._alarm_workflow = None
+        if self._reconnect_workflow is not None:
+            self.database.clear_offline_check(
+                self.vehicle_id, "offline_check_service_stopped"
+            )
+            self._reconnect_workflow = None
         for task in self._timeout_tasks.values():
             task.cancel()
         if self._timeout_tasks:
@@ -169,7 +182,8 @@ class RemoteService:
                     self.session = None
                     self._policy_reconcile_pending = False
                     self._alarm_workflow = None
-                    self.database.update_vehicle_state(self.vehicle_id, online=0)
+                    self._reconnect_workflow = None
+                    self.database.mark_device_disconnected(self.vehicle_id)
                     active = self.database.active_command(self.vehicle_id)
                     if active:
                         self._finish(active["id"], "unknown", "connection_lost")
@@ -186,6 +200,7 @@ class RemoteService:
             if self.session and self.session.writer is not writer:
                 self.session.writer.close()
             self._policy_reconcile_pending = False
+            self._reconnect_workflow = None
             self.session = DeviceSession(writer, frame.vendor, time.monotonic())
             self.database.update_vehicle_state(
                 self.vehicle_id, online=1, last_seen_at=int(time.time())
@@ -218,6 +233,7 @@ class RemoteService:
                 self.session.policy_reconciled = True
                 reconcile_new_session = True
                 self._policy_reconcile_pending = True
+                self._prepare_reconnect_workflow(updates["lock_state"])
         elif frame.function == "S6" and fields and fields[0].isdigit():
             self.database.update_vehicle_state(
                 self.vehicle_id,
@@ -257,6 +273,7 @@ class RemoteService:
             if fields == ("1",):
                 movement = self.database.record_movement_event(self.vehicle_id)
                 if movement["alarm"] is not None and self._alarm_workflow is None:
+                    self._abort_reconnect_workflow("offline_check_superseded_by_w0")
                     movement_alarm_id = movement["alarm"]["id"]
                     self._alarm_workflow = {
                         "alarm_id": movement_alarm_id,
@@ -265,10 +282,8 @@ class RemoteService:
 
         active = self.database.active_command(self.vehicle_id)
         if active is None:
-            if movement_alarm_id:
-                await self._advance_alarm_workflow()
-            if reconcile_new_session:
-                await self._reconcile_pending_policy()
+            if movement_alarm_id or reconcile_new_session:
+                await self._advance_deferred_workflows()
             return
         status = active["status"]
         command_type = active["command_type"]
@@ -335,8 +350,17 @@ class RemoteService:
                         self._alarm_workflow = None
                     else:
                         await self._advance_alarm_workflow()
+                elif (command_type == "location.once"
+                      and parameters.get("location_source") == "reconnect_check"):
+                    self._abort_reconnect_workflow(
+                        "offline_check_invalid_response",
+                        {"sample_index": parameters.get("sample_index")},
+                    )
+                    await self._advance_deferred_workflows()
                 elif command_type != "tracking.set_policy":
                     await self._reconcile_pending_policy()
+                else:
+                    await self._advance_deferred_workflows()
             return
         if frame.function in {"L0", "L1"}:
             await self._send(frame.function, [])
@@ -372,14 +396,19 @@ class RemoteService:
             await self.reconcile_tracking_policy("lock_state_changed")
         elif command_type == "tracking.set_policy" and self._alarm_workflow:
             await self._advance_alarm_workflow()
+        elif (command_type == "location.once"
+              and parameters.get("location_source") == "reconnect_check"):
+            await self._complete_reconnect_location(
+                stored_location, parameters.get("sample_index")
+            )
         elif command_type == "location.once" and self._alarm_workflow:
             if self._alarm_workflow["stage"] == "awaiting_location":
                 self._alarm_workflow = None
             else:
                 await self._advance_alarm_workflow()
-        elif command_type != "tracking.set_policy":
-            await self._reconcile_pending_policy()
-            await self._advance_alarm_workflow()
+            await self._advance_deferred_workflows()
+        else:
+            await self._advance_deferred_workflows()
 
     async def start_background_tasks(self) -> None:
         self.database.arm_if_grace_expired(self.vehicle_id)
@@ -430,6 +459,120 @@ class RemoteService:
         finally:
             if self._grace_task is asyncio.current_task():
                 self._grace_task = None
+
+    def _prepare_reconnect_workflow(self, confirmed_lock_state: str) -> None:
+        pending = self.database.pending_offline_check(self.vehicle_id)
+        if pending is None:
+            return
+        vehicle = self.database.vehicle(self.vehicle_id)
+        baseline = pending["baseline_location"]
+        if confirmed_lock_state != "locked":
+            self.database.clear_offline_check(
+                self.vehicle_id, "offline_check_skipped_unlocked"
+            )
+            return
+        if baseline is None:
+            self.database.clear_offline_check(
+                self.vehicle_id, "offline_check_skipped_no_baseline"
+            )
+            return
+        if vehicle["active_alarm_id"] is not None:
+            self.database.clear_offline_check(
+                self.vehicle_id, "offline_check_skipped_active_alarm"
+            )
+            return
+        self._reconnect_workflow = {
+            "stage": "first",
+            "offline_started_at": pending["offline_since"],
+            "baseline_location_id": baseline["id"],
+        }
+
+    def _abort_reconnect_workflow(
+        self, event_type: str, detail: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if self._reconnect_workflow is None:
+            return
+        self._reconnect_workflow = None
+        self.database.clear_offline_check(self.vehicle_id, event_type, detail)
+
+    async def _advance_reconnect_workflow(self) -> None:
+        workflow = self._reconnect_workflow
+        if workflow is None or self.database.active_command(self.vehicle_id):
+            return
+        if not self.is_online():
+            self._abort_reconnect_workflow("offline_check_connection_lost")
+            return
+        if workflow["stage"] not in {"first", "second"}:
+            return
+        sample_index = 1 if workflow["stage"] == "first" else 2
+        workflow["stage"] = "awaiting_first" if sample_index == 1 else "awaiting_second"
+        command, _ = self.database.create_command(
+            self.vehicle_id, None, "location.once",
+            {"location_source": "reconnect_check", "sample_index": sample_index}, None,
+        )
+        await self.dispatch_command(command["id"])
+        if self.database.command(command["id"])["status"] in TERMINAL:
+            self._abort_reconnect_workflow(
+                "offline_check_request_failed", {"sample_index": sample_index}
+            )
+
+    async def _complete_reconnect_location(
+        self, location: Optional[dict[str, Any]], sample_index: Any,
+    ) -> None:
+        workflow = self._reconnect_workflow
+        expected_stage = "awaiting_first" if sample_index == 1 else "awaiting_second"
+        if workflow is None or workflow.get("stage") != expected_stage:
+            return
+        if location is None or not location["valid"] or not location["display_eligible"]:
+            self._abort_reconnect_workflow(
+                "offline_check_untrusted_location",
+                {
+                    "sample_index": sample_index,
+                    "rejection_reason": location.get("rejection_reason") if location else None,
+                },
+            )
+            await self._advance_deferred_workflows()
+            return
+        if sample_index == 1:
+            workflow["reconnect_location_one_id"] = location["id"]
+            workflow["stage"] = "second"
+            await self._advance_reconnect_workflow()
+            return
+        if location["id"] == workflow["reconnect_location_one_id"]:
+            self._abort_reconnect_workflow(
+                "offline_check_duplicate_location", {"sample_index": sample_index}
+            )
+            await self._advance_deferred_workflows()
+            return
+        result = self.database.finalize_offline_movement_check(
+            self.vehicle_id,
+            offline_started_at=workflow["offline_started_at"],
+            baseline_location_id=workflow["baseline_location_id"],
+            reconnect_location_one_id=workflow["reconnect_location_one_id"],
+            reconnect_location_two_id=location["id"],
+            movement_threshold_m=self.offline_movement_threshold_m,
+            sample_max_separation_m=self.offline_sample_max_separation_m,
+        )
+        self._reconnect_workflow = None
+        if result["inferred"]:
+            self.database.update_vehicle_state(
+                self.vehicle_id,
+                desired_tracking_interval=TRACKING_POLICIES["alarm"],
+            )
+        await self._advance_deferred_workflows()
+
+    async def _advance_deferred_workflows(self) -> None:
+        if self.database.active_command(self.vehicle_id):
+            return
+        if self._alarm_workflow is not None:
+            await self._advance_alarm_workflow()
+            if self.database.active_command(self.vehicle_id):
+                return
+        if self._reconnect_workflow is not None:
+            await self._advance_reconnect_workflow()
+            if self.database.active_command(self.vehicle_id):
+                return
+        await self._reconcile_pending_policy()
 
     async def _advance_alarm_workflow(self) -> None:
         workflow = self._alarm_workflow
@@ -640,9 +783,15 @@ class RemoteService:
                         self._alarm_workflow = None
                     else:
                         await self._advance_alarm_workflow()
-                elif command["command_type"] != "tracking.set_policy":
-                    await self._reconcile_pending_policy()
-                    await self._advance_alarm_workflow()
+                elif (command["command_type"] == "location.once"
+                      and command["parameters"].get("location_source") == "reconnect_check"):
+                    self._abort_reconnect_workflow(
+                        "offline_check_timeout",
+                        {"sample_index": command["parameters"].get("sample_index")},
+                    )
+                    await self._advance_deferred_workflows()
+                else:
+                    await self._advance_deferred_workflows()
         except asyncio.CancelledError:
             pass
 

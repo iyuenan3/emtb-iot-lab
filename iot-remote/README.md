@@ -16,6 +16,7 @@
 - 锁状态变化后协调 D1 定位策略，分别保存期望值和设备确认值，超时不自动重发。
 - 物理关锁确认后进入 5 分钟等待，支持独立手动布防、W0 事件抑制或告警、60 秒合并、告警解除，以及 D1 300 秒后串行 D0。
 - 确认开锁与关锁维护骑行生命周期，可靠定位点形成估算轨迹；提供骑行历史、7 天或 30 天保留设置和每日 03:30 整段清理。
+- 关锁状态断连时保存最后可信停车位置，新会话 H0 再次确认关锁后串行请求两次 D0；两次均明显偏离基线且彼此一致时创建推断告警。
 
 ## 本地运行
 
@@ -29,7 +30,9 @@ python3 -m iot_remote serve \
   --http-port 18081 \
   --location-min-satellites 4 \
   --location-max-hdop 8.0 \
-  --location-max-speed-mps 25.0
+  --location-max-speed-mps 25.0 \
+  --offline-movement-threshold-m 200 \
+  --offline-sample-max-separation-m 75
 ```
 
 HTTP 默认只监听 `127.0.0.1:18081`，部署时应由反向代理提供 HTTPS。不要直接把 HTTP 端口暴露到公网。TCP 端口供 IoT 设备连接，同一时刻只能有一个服务监听。
@@ -42,7 +45,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 
 ## 部署
 
-将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。定位质量阈值也由该文件集中配置，默认至少 4 颗卫星、HDOP 不高于 8、相邻可靠点估算速度不高于 25 米每秒。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。切换时还要确认旧服务在 `TimeoutStopSec` 内以 `Result=success` 停止，不能把 systemd 强制杀死当成正常退出。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
+将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。定位质量阈值也由该文件集中配置，默认至少 4 颗卫星、HDOP 不高于 8、相邻可靠点估算速度不高于 25 米每秒。离线移动推断默认要求两次位置分别偏离停车基线至少 200 米，且两个样本相距不超过 75 米；这两个值是无户外样本时的保守初值，必须根据实车数据校准。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。切换时还要确认旧服务在 `TimeoutStopSec` 内以 `Result=success` 停止，不能把 systemd 强制杀死当成正常退出。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
 
 2026 年 8 月 22 日部署基线为 Git revision `5002f2f`。`emtb-iot-remote.service` 已通过远端 Python 3.12 的 54 项测试、内部 readiness、公网 revision、未认证 API 401、主页 200、四个核心源码哈希、骑行与保留数据库迁移及权限检查。设备在新版本上完成两次自动重连，真实活动 IoT 长连接下停止仍为 `Result=success`。旧源码、unit 和 SQLite 在线备份均保留为回滚材料。真实 W0、D1、告警定位链和 60 秒轨迹仍待实车验收。
 

@@ -74,6 +74,13 @@ class DatabaseTests(unittest.TestCase):
             "TEXT NOT NULL, UNIQUE(vehicle_id,fingerprint))"
         )
         connection.execute(
+            "CREATE TABLE alarms (id TEXT PRIMARY KEY, vehicle_id TEXT NOT NULL, "
+            "alarm_type TEXT NOT NULL, state TEXT NOT NULL, inferred INTEGER NOT NULL DEFAULT 0, "
+            "first_triggered_at INTEGER NOT NULL, last_triggered_at INTEGER NOT NULL, "
+            "trigger_count INTEGER NOT NULL DEFAULT 1, acknowledged_at INTEGER, cleared_at INTEGER, "
+            "acknowledged_by TEXT, note TEXT)"
+        )
+        connection.execute(
             "INSERT INTO locations(vehicle_id,source,device_timestamp,received_at,valid,latitude,"
             "longitude,satellites,hdop,altitude_m,mode,raw_fields_json,fingerprint) "
             "VALUES('vehicle-1','once',1700000000,1700000001,1,30.0,120.0,6,0.8,10.0,'A',"
@@ -87,6 +94,9 @@ class DatabaseTests(unittest.TestCase):
         }
         location_columns = {
             row[1] for row in migrated.connection.execute("PRAGMA table_info(locations)")
+        }
+        alarm_columns = {
+            row[1] for row in migrated.connection.execute("PRAGMA table_info(alarms)")
         }
         legacy_location = migrated.connection.execute(
             "SELECT display_eligible FROM locations WHERE fingerprint='legacy'"
@@ -102,11 +112,17 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("grace_until", columns)
         self.assertIn("active_alarm_id", columns)
         self.assertIn("active_trip_id", columns)
+        self.assertIn("offline_since", columns)
+        self.assertIn("parked_location_id", columns)
         self.assertIn("rejection_reason", location_columns)
         self.assertIn("distance_from_previous_m", location_columns)
         self.assertIn("speed_mps", location_columns)
         self.assertIn("alarm_id", location_columns)
         self.assertIn("trip_id", location_columns)
+        self.assertIn("offline_started_at", alarm_columns)
+        self.assertIn("baseline_location_id", alarm_columns)
+        self.assertIn("reconnect_location_two_id", alarm_columns)
+        self.assertIn("movement_threshold_m", alarm_columns)
         self.assertEqual(legacy_location[0], 1)
 
     def test_trip_lifecycle_counts_points_and_breaks_long_gaps(self):
@@ -234,6 +250,83 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(
             self.database.vehicle(self.vehicle_id)["security_state"], "alarm_active"
         )
+
+    def test_two_consistent_reconnect_locations_infer_offline_movement(self):
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "test", 100
+        )
+        baseline = self.database.save_location(
+            self.vehicle_id, source="tracking", device_timestamp=100,
+            valid=True, latitude=30.0, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("baseline",),
+        )
+        disconnected = self.database.mark_device_disconnected(
+            self.vehicle_id, now=150
+        )
+        self.assertEqual(disconnected["parked_location_id"], baseline["id"])
+        one = self.database.save_location(
+            self.vehicle_id, source="reconnect_check", device_timestamp=200,
+            valid=True, latitude=30.0030, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("one",),
+        )
+        two = self.database.save_location(
+            self.vehicle_id, source="reconnect_check", device_timestamp=300,
+            valid=True, latitude=30.0031, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("two",),
+        )
+
+        result = self.database.finalize_offline_movement_check(
+            self.vehicle_id, offline_started_at=150,
+            baseline_location_id=baseline["id"],
+            reconnect_location_one_id=one["id"],
+            reconnect_location_two_id=two["id"],
+            movement_threshold_m=200.0, sample_max_separation_m=75.0,
+            now=400,
+        )
+
+        self.assertTrue(result["inferred"])
+        alarm = result["alarm"]
+        self.assertEqual(alarm["alarm_type"], "suspected_offline_movement")
+        self.assertTrue(alarm["inferred"])
+        self.assertEqual(alarm["baseline_captured_at"], 100)
+        self.assertEqual(alarm["reconnect_captured_at"], 300)
+        vehicle = self.database.vehicle(self.vehicle_id)
+        self.assertEqual(vehicle["active_alarm_id"], alarm["id"])
+        self.assertIsNone(vehicle["offline_since"])
+
+    def test_inconsistent_reconnect_locations_do_not_infer_movement(self):
+        self.database.apply_confirmed_lock_state(
+            self.vehicle_id, "locked", "test", 100
+        )
+        baseline = self.database.save_location(
+            self.vehicle_id, source="tracking", device_timestamp=100,
+            valid=True, latitude=30.0, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("baseline",),
+        )
+        self.database.mark_device_disconnected(self.vehicle_id, now=150)
+        one = self.database.save_location(
+            self.vehicle_id, source="reconnect_check", device_timestamp=200,
+            valid=True, latitude=30.0030, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("one",),
+        )
+        two = self.database.save_location(
+            self.vehicle_id, source="reconnect_check", device_timestamp=300,
+            valid=True, latitude=30.0060, longitude=120.0, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("two",),
+        )
+
+        result = self.database.finalize_offline_movement_check(
+            self.vehicle_id, offline_started_at=150,
+            baseline_location_id=baseline["id"],
+            reconnect_location_one_id=one["id"],
+            reconnect_location_two_id=two["id"],
+            movement_threshold_m=200.0, sample_max_separation_m=75.0,
+            now=400,
+        )
+
+        self.assertFalse(result["inferred"])
+        self.assertEqual(self.database.alarms(self.vehicle_id), [])
+        self.assertIsNone(self.database.vehicle(self.vehicle_id)["offline_since"])
 
     def test_alarm_acknowledge_and_unlock_clear_are_distinct(self):
         self.database.apply_confirmed_lock_state(

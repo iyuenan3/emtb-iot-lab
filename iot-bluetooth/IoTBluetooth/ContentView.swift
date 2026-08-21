@@ -259,6 +259,17 @@ private struct VehicleHomeView: View {
                 .font(.title3.bold())
             Text("触发 \(alarm.triggerCount) 次，最近一次 \(Date(timeIntervalSince1970: TimeInterval(alarm.lastTriggeredAt)).formatted(date: .abbreviated, time: .standard))")
                 .font(.callout)
+            if alarm.inferred {
+                Text("服务端根据两次重连定位推断，不是实时 W0。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                if let baseline = alarm.baselineCapturedAt,
+                   let reconnect = alarm.reconnectCapturedAt {
+                    Text("停车位置 \(Date(timeIntervalSince1970: TimeInterval(baseline)).formatted(date: .abbreviated, time: .standard))，重连定位 \(Date(timeIntervalSince1970: TimeInterval(reconnect)).formatted(date: .abbreviated, time: .standard))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             HStack {
                 Button("确认并解除", systemImage: "checkmark.shield.fill") {
                     Task {
@@ -616,6 +627,13 @@ private struct ActivityView: View {
                             }
                             Text("触发 \(alarm.triggerCount) 次")
                                 .font(.caption).foregroundStyle(.secondary)
+                            if alarm.inferred,
+                               let baseline = alarm.baselineCapturedAt,
+                               let reconnect = alarm.reconnectCapturedAt {
+                                Text("停车 \(Date(timeIntervalSince1970: TimeInterval(baseline)).formatted(date: .numeric, time: .shortened))，重连 \(Date(timeIntervalSince1970: TimeInterval(reconnect)).formatted(date: .numeric, time: .shortened))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                             Text(
                                 Date(timeIntervalSince1970: TimeInterval(alarm.lastTriggeredAt)),
                                 style: .relative

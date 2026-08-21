@@ -71,6 +71,9 @@ struct RemoteAlarm: Decodable, Identifiable {
     let triggerCount: Int
     let acknowledgedAt: Int?
     let clearedAt: Int?
+    let offlineStartedAt: Int?
+    let baselineCapturedAt: Int?
+    let reconnectCapturedAt: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, state, inferred
@@ -80,6 +83,9 @@ struct RemoteAlarm: Decodable, Identifiable {
         case triggerCount = "trigger_count"
         case acknowledgedAt = "acknowledged_at"
         case clearedAt = "cleared_at"
+        case offlineStartedAt = "offline_started_at"
+        case baselineCapturedAt = "baseline_captured_at"
+        case reconnectCapturedAt = "reconnect_captured_at"
     }
 }
 

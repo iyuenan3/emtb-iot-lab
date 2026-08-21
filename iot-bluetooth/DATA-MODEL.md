@@ -67,8 +67,8 @@
 | `desired_tracking_interval` | INTEGER | 期望 D1 秒数 |
 | `confirmed_tracking_interval` | INTEGER NULL | 设备回包确认值 |
 | `tracking_confirmed_at` | INTEGER NULL | 最近确认时间 |
-| `offline_since` | INTEGER NULL | 首次判定离线时间 |
-| `last_parked_position_id` | TEXT NULL | 断网前最后可信停车位置 |
+| `offline_since` | INTEGER NULL | 连接断开时间 |
+| `parked_location_id` | INTEGER NULL | 断网前最后可信停车位置 |
 | `battery_percent` | INTEGER NULL | 已验证电量字段 |
 | `motor_rpm` | INTEGER NULL | 关锁预检候选字段 |
 | `telemetry_at` | INTEGER NULL | S6 采集时间 |
@@ -235,12 +235,21 @@ Build 13 已落地 `trips`、`vehicle_state.active_trip_id`、`locations.trip_id
 | `acknowledged_by` | TEXT NULL FK | 客户端 |
 | `position_command_id` | TEXT NULL FK | 立即定位命令 |
 | `note` | TEXT NULL | 用户备注，不存秘密 |
+| `offline_started_at` | INTEGER NULL | 推断所用断连时间 |
+| `baseline_location_id` | INTEGER NULL | 断网前停车基线 |
+| `reconnect_location_one_id` | INTEGER NULL | 第一次重连定位 |
+| `reconnect_location_two_id` | INTEGER NULL | 第二次重连定位 |
+| `baseline_distance_one_m` | REAL NULL | 第一次定位相对基线距离 |
+| `baseline_distance_two_m` | REAL NULL | 第二次定位相对基线距离 |
+| `sample_distance_m` | REAL NULL | 两次重连定位间距 |
+| `movement_threshold_m` | REAL NULL | 当次使用的位移阈值 |
+| `sample_max_separation_m` | REAL NULL | 当次使用的样本一致性阈值 |
 
 同类活动告警在 60 秒窗口内增加 `trigger_count`，不重复创建。活动异常移动告警通过部分唯一索引限制为一条。
 
 `suspected_offline_movement` 必须满足：断网前存在可信停车位置、重连时仍确认关锁、两次重连定位均有效且通过漂移过滤。定位阈值由户外验收配置，告警详情必须展示“推断”标签和用于比较的位置时间。
 
-Build 12 已落地 `alarms`、`alarm_events`、`vehicle_state.grace_until`、`vehicle_state.active_alarm_id` 和 `locations.alarm_id`。等待期抑制、60 秒提醒窗口、活动告警合并、用户确认与授权开锁解除均在 SQLite 事务中处理。离线移动推断仍未接入。
+Build 12 已落地 `alarms`、`alarm_events`、`vehicle_state.grace_until`、`vehicle_state.active_alarm_id` 和 `locations.alarm_id`。Build 14 增加 `vehicle_state.offline_since`、`parked_location_id` 和告警比较字段，持久化断连基线、两次重连定位、比较距离及当次阈值。等待期抑制、活动告警、用户确认、授权开锁解除和离线推断均在 SQLite 事务中处理。
 
 ### 6.2 `alarm_events`
 

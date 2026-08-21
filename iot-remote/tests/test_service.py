@@ -288,6 +288,154 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.database.trip(trip_id)["status"], "completed")
 
+    async def test_reconnect_h0_requests_two_locations_and_infers_movement(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", 1
+        )
+        baseline = self.database.save_location(
+            self.service.vehicle_id, source="tracking", device_timestamp=1,
+            valid=True, latitude=22.6200, longitude=114.14369, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("baseline",),
+        )
+        self.database.mark_device_disconnected(self.service.vehicle_id, now=2)
+        reconnect_writer = FakeWriter()
+        self.service.session = DeviceSession(
+            reconnect_writer, "ZZ", asyncio.get_running_loop().time()
+        )
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("1", "412", "31", "99", "0")
+        ))
+
+        first_command = self.database.active_command(self.service.vehicle_id)
+        self.assertEqual(first_command["command_type"], "location.once")
+        self.assertEqual(first_command["parameters"]["location_source"], "reconnect_check")
+        self.assertEqual(first_command["parameters"]["sample_index"], 1)
+        self.assertEqual(reconnect_writer.data.count(b",D0#"), 1)
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "D0",
+            ("0", "124458.00", "A", "2237.7514", "N", "11408.6214", "E",
+             "6", "0.21", "151216", "10", "M", "A"),
+        ))
+
+        second_command = self.database.active_command(self.service.vehicle_id)
+        self.assertEqual(second_command["parameters"]["sample_index"], 2)
+        self.assertEqual(reconnect_writer.data.count(b",D0#"), 2)
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "D0",
+            ("0", "124559.00", "A", "2237.7520", "N", "11408.6216", "E",
+             "6", "0.22", "151216", "10", "M", "A"),
+        ))
+
+        alarm = self.database.alarms(self.service.vehicle_id, active_only=True)[0]
+        self.assertEqual(alarm["alarm_type"], "suspected_offline_movement")
+        self.assertTrue(alarm["inferred"])
+        self.assertEqual(alarm["baseline_location_id"], baseline["id"])
+        self.assertIsNotNone(alarm["baseline_captured_at"])
+        self.assertIsNotNone(alarm["reconnect_captured_at"])
+        self.assertIsNone(self.service._reconnect_workflow)
+        active = self.database.active_command(self.service.vehicle_id)
+        self.assertEqual(active["command_type"], "tracking.set_policy")
+        self.assertEqual(active["parameters"]["interval_seconds"], 300)
+
+    async def test_reconnect_location_timeout_does_not_retry_same_session(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", 1
+        )
+        self.database.save_location(
+            self.service.vehicle_id, source="tracking", device_timestamp=1,
+            valid=True, latitude=22.6200, longitude=114.14369, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("baseline",),
+        )
+        self.database.mark_device_disconnected(self.service.vehicle_id, now=2)
+        reconnect_writer = FakeWriter()
+        self.service.session = DeviceSession(
+            reconnect_writer, "ZZ", asyncio.get_running_loop().time()
+        )
+        self.service.command_timeout = 0.01
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("1", "412", "31", "99", "0")
+        ))
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(reconnect_writer.data.count(b",D0#"), 1)
+        self.assertIsNone(self.service._reconnect_workflow)
+        self.assertIsNone(
+            self.database.vehicle(self.service.vehicle_id)["offline_since"]
+        )
+
+    async def test_reconnect_duplicate_location_does_not_count_twice(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", 1
+        )
+        self.database.save_location(
+            self.service.vehicle_id, source="tracking", device_timestamp=1,
+            valid=True, latitude=22.6200, longitude=114.14369, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("baseline",),
+        )
+        self.database.mark_device_disconnected(self.service.vehicle_id, now=2)
+        reconnect_writer = FakeWriter()
+        self.service.session = DeviceSession(
+            reconnect_writer, "ZZ", asyncio.get_running_loop().time()
+        )
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("1", "412", "31", "99", "0")
+        ))
+        location_frame = Frame(
+            "ZZ", self.service.target_imei, "D0",
+            ("0", "124458.00", "A", "2237.7514", "N", "11408.6214", "E",
+             "6", "0.21", "151216", "10", "M", "A"),
+        )
+
+        await self.service.process_frame(location_frame)
+        await self.service.process_frame(location_frame)
+
+        self.assertEqual(reconnect_writer.data.count(b",D0#"), 2)
+        self.assertEqual(self.database.alarms(self.service.vehicle_id), [])
+        self.assertIsNone(self.service._reconnect_workflow)
+        event_types = [
+            event["event_type"]
+            for event in self.database.alarm_events(self.service.vehicle_id)
+        ]
+        self.assertIn("offline_check_duplicate_location", event_types)
+
+    async def test_reconnect_check_waits_for_active_tracking_command(self):
+        self.database.apply_confirmed_lock_state(
+            self.service.vehicle_id, "locked", "test", 1
+        )
+        self.database.save_location(
+            self.service.vehicle_id, source="tracking", device_timestamp=1,
+            valid=True, latitude=22.6200, longitude=114.14369, satellites=6,
+            hdop=0.8, altitude_m=10.0, mode="A", raw_fields=("baseline",),
+        )
+        self.database.mark_device_disconnected(self.service.vehicle_id, now=2)
+        tracking = self.create(
+            "tracking.set_policy",
+            parameters={"interval_seconds": 3600, "reason": "existing"},
+        )
+        reconnect_writer = FakeWriter()
+        self.service.session = DeviceSession(
+            reconnect_writer, "ZZ", asyncio.get_running_loop().time()
+        )
+        await self.service.dispatch_command(tracking["id"])
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "H0", ("1", "412", "31", "99", "0")
+        ))
+        self.assertEqual(
+            self.database.active_command(self.service.vehicle_id)["id"], tracking["id"]
+        )
+        self.assertEqual(reconnect_writer.data.count(b",D0#"), 0)
+
+        await self.service.process_frame(Frame(
+            "ZZ", self.service.target_imei, "D1", ("3600",)
+        ))
+        active = self.database.active_command(self.service.vehicle_id)
+        self.assertEqual(active["command_type"], "location.once")
+        self.assertEqual(active["parameters"]["location_source"], "reconnect_check")
+        self.assertEqual(reconnect_writer.data.count(b",D0#"), 1)
+
     async def test_d1_keeps_desired_and_confirmed_values_separate(self):
         command = self.create(
             "tracking.set_policy", parameters={"interval_seconds": 60, "reason": "test"}

@@ -23,6 +23,8 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--location-min-satellites", type=int, default=4)
     serve.add_argument("--location-max-hdop", type=float, default=8.0)
     serve.add_argument("--location-max-speed-mps", type=float, default=25.0)
+    serve.add_argument("--offline-movement-threshold-m", type=float, default=200.0)
+    serve.add_argument("--offline-sample-max-separation-m", type=float, default=75.0)
     pairing = subcommands.add_parser("pairing-code", help="生成十分钟有效的一次性配对码")
     pairing.add_argument("--db", required=True)
     pairing.add_argument("--ttl", type=int, default=600)
@@ -43,6 +45,8 @@ def main() -> None:
         location_min_satellites=arguments.location_min_satellites,
         location_max_hdop=arguments.location_max_hdop,
         location_max_speed_mps=arguments.location_max_speed_mps,
+        offline_movement_threshold_m=arguments.offline_movement_threshold_m,
+        offline_sample_max_separation_m=arguments.offline_sample_max_separation_m,
     )
     try:
         asyncio.run(run_servers(

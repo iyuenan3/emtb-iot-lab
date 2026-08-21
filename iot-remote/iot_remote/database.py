@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS vehicle_state (
   lock_state_updated_at INTEGER, desired_tracking_interval INTEGER,
   confirmed_tracking_interval INTEGER, tracking_confirmed_at INTEGER,
   grace_until INTEGER, active_alarm_id TEXT, active_trip_id TEXT,
+  offline_since INTEGER, parked_location_id INTEGER,
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pairing_codes (
@@ -87,7 +88,11 @@ CREATE TABLE IF NOT EXISTS alarms (
   inferred INTEGER NOT NULL DEFAULT 0, first_triggered_at INTEGER NOT NULL,
   last_triggered_at INTEGER NOT NULL, trigger_count INTEGER NOT NULL DEFAULT 1,
   acknowledged_at INTEGER, cleared_at INTEGER, acknowledged_by TEXT,
-  note TEXT
+  note TEXT, offline_started_at INTEGER, baseline_location_id INTEGER,
+  reconnect_location_one_id INTEGER, reconnect_location_two_id INTEGER,
+  baseline_distance_one_m REAL, baseline_distance_two_m REAL,
+  sample_distance_m REAL, movement_threshold_m REAL,
+  sample_max_separation_m REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS alarms_active_type
   ON alarms(vehicle_id, alarm_type) WHERE state='active';
@@ -125,6 +130,7 @@ class Database:
         self.connection.executescript(SCHEMA)
         self._migrate_vehicle_state()
         self._migrate_locations()
+        self._migrate_alarms()
         self.connection.commit()
         os.chmod(self.path, 0o600)
 
@@ -160,6 +166,12 @@ class Database:
             self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN active_alarm_id TEXT")
         if "active_trip_id" not in columns:
             self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN active_trip_id TEXT")
+        if "offline_since" not in columns:
+            self.connection.execute("ALTER TABLE vehicle_state ADD COLUMN offline_since INTEGER")
+        if "parked_location_id" not in columns:
+            self.connection.execute(
+                "ALTER TABLE vehicle_state ADD COLUMN parked_location_id INTEGER"
+            )
 
     def _migrate_locations(self) -> None:
         columns = {
@@ -188,6 +200,27 @@ class Database:
             "CREATE INDEX IF NOT EXISTS locations_trip_time "
             "ON locations(trip_id, received_at) WHERE trip_id IS NOT NULL"
         )
+
+    def _migrate_alarms(self) -> None:
+        columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(alarms)")
+        }
+        additions = {
+            "offline_started_at": "INTEGER",
+            "baseline_location_id": "INTEGER",
+            "reconnect_location_one_id": "INTEGER",
+            "reconnect_location_two_id": "INTEGER",
+            "baseline_distance_one_m": "REAL",
+            "baseline_distance_two_m": "REAL",
+            "sample_distance_m": "REAL",
+            "movement_threshold_m": "REAL",
+            "sample_max_separation_m": "REAL",
+        }
+        for name, column_type in additions.items():
+            if name not in columns:
+                self.connection.execute(
+                    f"ALTER TABLE alarms ADD COLUMN {name} {column_type}"
+                )
 
     def close(self) -> None:
         self.connection.close()
@@ -274,6 +307,7 @@ class Database:
             "lock_state_updated_at", "desired_tracking_interval",
             "confirmed_tracking_interval", "tracking_confirmed_at",
             "grace_until", "active_alarm_id", "active_trip_id",
+            "offline_since", "parked_location_id",
         }
         filtered = {key: value for key, value in values.items() if key in allowed}
         if not filtered:
@@ -285,6 +319,80 @@ class Database:
             (*filtered.values(), vehicle_id),
         )
         self.connection.commit()
+
+    def mark_device_disconnected(self, vehicle_id: str,
+                                 now: Optional[int] = None) -> dict[str, Any]:
+        current_time = int(time.time()) if now is None else now
+        state = self.connection.execute(
+            "SELECT lock_state FROM vehicle_state WHERE vehicle_id=?", (vehicle_id,)
+        ).fetchone()
+        if state is None:
+            raise KeyError(vehicle_id)
+        baseline_id = None
+        if state["lock_state"] == "locked":
+            baseline = self.connection.execute(
+                "SELECT id FROM locations WHERE vehicle_id=? AND valid=1 "
+                "AND display_eligible=1 ORDER BY "
+                "COALESCE(device_timestamp,received_at) DESC,id DESC LIMIT 1",
+                (vehicle_id,),
+            ).fetchone()
+            baseline_id = baseline["id"] if baseline else None
+        with self.connection:
+            self.connection.execute(
+                "UPDATE vehicle_state SET online=0,offline_since=?,parked_location_id=?,"
+                "updated_at=? WHERE vehicle_id=?",
+                (
+                    current_time if state["lock_state"] == "locked" else None,
+                    baseline_id,
+                    current_time,
+                    vehicle_id,
+                ),
+            )
+            self._insert_alarm_event(
+                vehicle_id, None, "device_disconnected",
+                {
+                    "locked": state["lock_state"] == "locked",
+                    "offline_check_available": baseline_id is not None,
+                },
+                current_time,
+            )
+        return self.vehicle(vehicle_id)
+
+    def pending_offline_check(self, vehicle_id: str) -> Optional[dict[str, Any]]:
+        state = self.connection.execute(
+            "SELECT offline_since,parked_location_id FROM vehicle_state WHERE vehicle_id=?",
+            (vehicle_id,),
+        ).fetchone()
+        if state is None:
+            raise KeyError(vehicle_id)
+        if state["offline_since"] is None:
+            return None
+        baseline = None
+        if state["parked_location_id"] is not None:
+            row = self.connection.execute(
+                "SELECT * FROM locations WHERE id=? AND vehicle_id=? AND valid=1 "
+                "AND display_eligible=1",
+                (state["parked_location_id"], vehicle_id),
+            ).fetchone()
+            baseline = self._location_dict(row) if row else None
+        return {
+            "offline_since": state["offline_since"],
+            "baseline_location": baseline,
+        }
+
+    def clear_offline_check(self, vehicle_id: str, event_type: str,
+                            detail: Optional[dict[str, Any]] = None,
+                            now: Optional[int] = None) -> None:
+        current_time = int(time.time()) if now is None else now
+        with self.connection:
+            self.connection.execute(
+                "UPDATE vehicle_state SET offline_since=NULL,parked_location_id=NULL,"
+                "updated_at=? WHERE vehicle_id=?",
+                (current_time, vehicle_id),
+            )
+            self._insert_alarm_event(
+                vehicle_id, None, event_type, detail or {}, current_time
+            )
 
     def apply_confirmed_lock_state(self, vehicle_id: str, lock_state: str,
                                    source: str, updated_at: int,
@@ -308,7 +416,7 @@ class Database:
                     "UPDATE vehicle_state SET lock_state='unlocked',security_state='disarmed',"
                     "grace_until=NULL,active_alarm_id=NULL,active_unlock_user=?,"
                     "active_unlock_timestamp=?,lock_state_source=?,lock_state_updated_at=?,"
-                    "updated_at=? WHERE vehicle_id=?",
+                    "offline_since=NULL,parked_location_id=NULL,updated_at=? WHERE vehicle_id=?",
                     (unlock_user, unlock_timestamp, source, updated_at, updated_at, vehicle_id),
                 )
                 for alarm in active_alarms:
@@ -538,6 +646,112 @@ class Database:
             "suppressed": False,
             "alarm": self.alarm(alarm_id),
             "should_notify": should_notify,
+        }
+
+    def finalize_offline_movement_check(
+        self, vehicle_id: str, *, offline_started_at: int,
+        baseline_location_id: int, reconnect_location_one_id: int,
+        reconnect_location_two_id: int, movement_threshold_m: float,
+        sample_max_separation_m: float, now: Optional[int] = None,
+    ) -> dict[str, Any]:
+        if movement_threshold_m <= 0 or sample_max_separation_m <= 0:
+            raise ValueError("离线移动阈值无效")
+        current_time = int(time.time()) if now is None else now
+        location_ids = (
+            baseline_location_id,
+            reconnect_location_one_id,
+            reconnect_location_two_id,
+        )
+        if len(set(location_ids)) != 3:
+            raise ValueError("离线移动定位必须互不重复")
+        rows = self.connection.execute(
+            "SELECT * FROM locations WHERE vehicle_id=? AND id IN (?,?,?)",
+            (vehicle_id, *location_ids),
+        ).fetchall()
+        by_id = {row["id"]: row for row in rows}
+        if any(location_id not in by_id for location_id in location_ids):
+            raise ValueError("离线移动定位不存在")
+        if any(
+            not row["valid"] or not row["display_eligible"]
+            or row["latitude"] is None or row["longitude"] is None
+            for row in by_id.values()
+        ):
+            raise ValueError("离线移动定位不可信")
+        baseline = by_id[baseline_location_id]
+        sample_one = by_id[reconnect_location_one_id]
+        sample_two = by_id[reconnect_location_two_id]
+        distance_one = self._distance_m(
+            baseline["latitude"], baseline["longitude"],
+            sample_one["latitude"], sample_one["longitude"],
+        )
+        distance_two = self._distance_m(
+            baseline["latitude"], baseline["longitude"],
+            sample_two["latitude"], sample_two["longitude"],
+        )
+        sample_distance = self._distance_m(
+            sample_one["latitude"], sample_one["longitude"],
+            sample_two["latitude"], sample_two["longitude"],
+        )
+        inferred = (
+            distance_one >= movement_threshold_m
+            and distance_two >= movement_threshold_m
+            and sample_distance <= sample_max_separation_m
+        )
+        detail = {
+            "baseline_location_id": baseline_location_id,
+            "reconnect_location_one_id": reconnect_location_one_id,
+            "reconnect_location_two_id": reconnect_location_two_id,
+            "baseline_distance_one_m": round(distance_one, 1),
+            "baseline_distance_two_m": round(distance_two, 1),
+            "sample_distance_m": round(sample_distance, 1),
+            "movement_threshold_m": movement_threshold_m,
+            "sample_max_separation_m": sample_max_separation_m,
+        }
+        alarm_id = None
+        with self.connection:
+            active = self.connection.execute(
+                "SELECT active_alarm_id FROM vehicle_state WHERE vehicle_id=?",
+                (vehicle_id,),
+            ).fetchone()
+            if inferred and active and active["active_alarm_id"] is None:
+                alarm_id = str(uuid.uuid4())
+                self.connection.execute(
+                    "INSERT INTO alarms(id,vehicle_id,alarm_type,state,inferred,"
+                    "first_triggered_at,last_triggered_at,trigger_count,note,"
+                    "offline_started_at,baseline_location_id,reconnect_location_one_id,"
+                    "reconnect_location_two_id,baseline_distance_one_m,"
+                    "baseline_distance_two_m,sample_distance_m,movement_threshold_m,"
+                    "sample_max_separation_m) VALUES(?,?,?,'active',1,?,?,1,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        alarm_id, vehicle_id, "suspected_offline_movement",
+                        current_time, current_time,
+                        "服务端根据两次重连定位推断，不是实时 W0",
+                        offline_started_at, baseline_location_id,
+                        reconnect_location_one_id, reconnect_location_two_id,
+                        distance_one, distance_two, sample_distance,
+                        movement_threshold_m, sample_max_separation_m,
+                    ),
+                )
+                self.connection.execute(
+                    "UPDATE vehicle_state SET security_state='alarm_active',"
+                    "active_alarm_id=?,grace_until=NULL WHERE vehicle_id=?",
+                    (alarm_id, vehicle_id),
+                )
+            self.connection.execute(
+                "UPDATE vehicle_state SET offline_since=NULL,parked_location_id=NULL,"
+                "updated_at=? WHERE vehicle_id=?",
+                (current_time, vehicle_id),
+            )
+            self._insert_alarm_event(
+                vehicle_id, alarm_id,
+                "offline_movement_inferred" if alarm_id else "offline_movement_not_inferred",
+                detail,
+                current_time,
+            )
+        return {
+            "inferred": alarm_id is not None,
+            "alarm": self.alarm(alarm_id) if alarm_id else None,
+            **detail,
         }
 
     def acknowledge_alarm(self, vehicle_id: str, client_id: str,
@@ -1037,11 +1251,24 @@ class Database:
         result.pop("fingerprint", None)
         return result
 
-    @staticmethod
-    def _alarm_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _alarm_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["inferred"] = bool(result["inferred"])
+        baseline_id = result.get("baseline_location_id")
+        reconnect_id = result.get("reconnect_location_two_id")
+        result["baseline_captured_at"] = self._location_captured_at(baseline_id)
+        result["reconnect_captured_at"] = self._location_captured_at(reconnect_id)
         return result
+
+    def _location_captured_at(self, location_id: Optional[int]) -> Optional[int]:
+        if location_id is None:
+            return None
+        row = self.connection.execute(
+            "SELECT COALESCE(device_timestamp,received_at) AS captured_at "
+            "FROM locations WHERE id=?",
+            (location_id,),
+        ).fetchone()
+        return int(row["captured_at"]) if row else None
 
     @staticmethod
     def _trip_dict(row: sqlite3.Row) -> dict[str, Any]:
