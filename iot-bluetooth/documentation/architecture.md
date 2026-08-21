@@ -13,8 +13,8 @@
 | BLE 协议 | `OmniProtocol.swift` | 帧编码、解码、校验和命令定义 | 已实现 |
 | 云端状态 | `RemoteControlManager.swift` | 配对、签名、车辆与命令 API | 已实现首期能力 |
 | 本机密钥 | `KeychainStore.swift` | BLE 密钥和远程凭据 | 已实现 |
-| 远程服务 | `../iot-remote/` | 单车 TCP、HTTPS API、命令状态机 | 2026 年 8 月 22 日已部署 revision `2f3be25` |
-| 位置存储 | `../iot-remote/iot_remote/database.py` | D0 有效与无效报告、去重和历史查询 | Build 9 服务端已部署，真实坐标待验收 |
+| 远程服务 | `../iot-remote/` | 单车 TCP、HTTPS API、命令状态机 | 2026 年 8 月 22 日已部署 revision `3d295e4` |
+| 位置存储 | `../iot-remote/iot_remote/database.py` | D0 原始报告、质量过滤、去重和历史查询 | 已部署，真实坐标与阈值待验收 |
 
 ## 数据流
 

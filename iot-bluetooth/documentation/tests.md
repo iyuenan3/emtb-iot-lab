@@ -9,6 +9,8 @@
 
 iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 CoreBluetooth、Face ID、真机网络或车辆物理动作正确。
 
+2026 年 8 月 22 日，Build 11 完成签名构建、真机安装和系统启动。远端 revision `3d295e4` 在 Python 3.12 通过 38 项测试，并在真实活动 IoT 长连接下完成一次 `Result=success` 停止。以上证据不替代 App 页面、BLE 动作或 D1 回包的人工验收。
+
 ## 已完成实车验收
 
 - BLE 开锁和关锁会联动仪表、动力与轮毂锁。
@@ -19,7 +21,7 @@ iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 Cor
 ## 待验收
 
 - Build 9 MapKit 车辆标记、双找车按钮、首页远程关锁入口和户外可读性。
-- Build 10 BLE 状态优先、冲突提示、服务器同步和断开回退。
+- Build 11 的 BLE 状态优先、冲突提示、服务器同步、断开回退和 D1 状态显示。
 - 远程关锁的新版 App 端交互。
 - 真实 D0 有效坐标、MapKit 标记、时间与精度字段展示。
 - BLE 高级设置、RFID、外部锁、OTA 等逐项能力。
