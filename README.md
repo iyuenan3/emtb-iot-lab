@@ -70,7 +70,7 @@ cd ../iot-tcp-lab
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 ```
 
-当前基线包含 49 项远程服务测试和 16 项 TCP 工具测试。Build 12 已通过无签名真机目标编译；最近一次签名安装和系统启动证据仍是 Build 11。代码存在或 App 能启动不等于所有硬件能力均已实车验收，具体状态见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
+当前基线包含 49 项远程服务测试和 16 项 TCP 工具测试。Build 12 已完成无签名编译、签名构建、真机安装和系统启动。代码存在或 App 能启动不等于所有硬件能力均已实车验收，具体状态见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
 
 ## 安全与隐私
 

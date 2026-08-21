@@ -11,6 +11,8 @@ iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 Cor
 
 2026 年 8 月 22 日，Build 11 完成签名构建、真机安装和系统启动。远端 revision `3d295e4` 在 Python 3.12 通过 38 项测试，并在真实活动 IoT 长连接下完成一次 `Result=success` 停止。以上证据不替代 App 页面、BLE 动作或 D1 回包的人工验收。
 
+同日，Build 12 完成签名构建、真机安装和系统启动。远端 revision `dae2fc8` 在 Python 3.12 通过 49 项测试，SQLite 告警迁移和源码哈希一致，公网健康接口读回相同 revision，未认证 API 为 401，站点首页为 200。设备在新版本上自动重连，活动长连接下停止仍为 `Result=success`。真实 W0、D1 与告警页面继续待人工验收。
+
 ## 已完成实车验收
 
 - BLE 开锁和关锁会联动仪表、动力与轮毂锁。
@@ -21,7 +23,7 @@ iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 Cor
 ## 待验收
 
 - Build 9 MapKit 车辆标记、双找车按钮、首页远程关锁入口和户外可读性。
-- Build 11 的 BLE 状态优先、冲突提示、服务器同步、断开回退和 D1 状态显示。
+- Build 12 的 BLE 状态优先、冲突提示、服务器同步、断开回退、D1 状态显示、布防和告警页面。
 - 远程关锁的新版 App 端交互。
 - 真实 D0 有效坐标、MapKit 标记、时间与精度字段展示。
 - BLE 高级设置、RFID、外部锁、OTA 等逐项能力。
