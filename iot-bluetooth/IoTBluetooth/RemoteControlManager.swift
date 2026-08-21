@@ -384,10 +384,13 @@ final class RemoteControlManager: ObservableObject {
         RemoteCredentialVault.clientID != nil && RemoteCredentialVault.readToken != nil
     }
 
-    var capabilityCatalog: [CapabilityDisplayItem] {
+    func capabilityCatalog(
+        bleResults: [String: RemoteCapabilityLatestResult]
+    ) -> [CapabilityDisplayItem] {
         let remoteItems = capabilities.map { key, capability in
-            CapabilityDisplayItem(
-                id: capability.capabilityID ?? key,
+            let capabilityID = capability.capabilityID ?? key
+            return CapabilityDisplayItem(
+                id: capabilityID,
                 name: capability.name ?? key,
                 group: capability.group ?? "其他",
                 protocolName: capability.protocolName ?? "未标注",
@@ -400,10 +403,21 @@ final class RemoteControlManager: ObservableObject {
                 disabledReason: capability.disabledReason ?? capability.reason,
                 parametersSchema: capability.parametersSchema ?? "未标注",
                 persistence: capability.persistence ?? "未标注",
-                latestResult: capability.latestResult
+                latestResult: bleResults[capabilityID] ?? capability.latestResult
             )
         }
-        return remoteItems + Self.localBLECatalog
+        let localItems = Self.localBLECatalog.map { item in
+            CapabilityDisplayItem(
+                id: item.id, name: item.name, group: item.group,
+                protocolName: item.protocolName, channel: item.channel,
+                purpose: item.purpose, risk: item.risk,
+                supportStatus: item.supportStatus, enabled: item.enabled,
+                executable: item.executable, disabledReason: item.disabledReason,
+                parametersSchema: item.parametersSchema, persistence: item.persistence,
+                latestResult: bleResults[item.id]
+            )
+        }
+        return remoteItems + localItems
     }
 
     private static let localBLECatalog: [CapabilityDisplayItem] = [

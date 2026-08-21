@@ -7,6 +7,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     @Published private(set) var lockStateUpdatedAt: Date?
     @Published private(set) var completedLockEvent: PendingBLEEvent?
     @Published private(set) var events: [FieldLogEvent] = []
+    @Published private(set) var capabilityResults: [String: RemoteCapabilityLatestResult] = [:]
     @Published private(set) var isAuthenticated = false
     @Published private(set) var isBusy = false
     @Published private(set) var operationMessage = ""
@@ -384,10 +385,20 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         let content = frame.content
         switch frame.command {
         case OmniCommand.authenticate.rawValue:
-            guard content.count >= 2, content[0] == 1 else { fail("设备密钥认证失败"); return }
+            guard content.count >= 2, content[0] == 1 else {
+                recordCapabilityResult(
+                    "ble.01", status: "failed", errorCode: "authentication_failed",
+                    summary: "认证结果无效，回包长度 \(content.count) 字节"
+                )
+                fail("设备密钥认证失败")
+                return
+            }
             connectionKey = content[1]
             isAuthenticated = true
             phase = .ready
+            recordCapabilityResult(
+                "ble.01", status: "succeeded", summary: "认证成功，回包长度 \(content.count) 字节"
+            )
             appendEvent("BLE", "设备认证成功")
             refreshAll()
 
@@ -400,6 +411,15 @@ final class BLEDeviceManager: NSObject, ObservableObject {
                 if !completePendingLockMutation(isLocked: snapshot.isLocked == true) {
                     lockStateUpdatedAt = snapshot.capturedAt
                 }
+                recordCapabilityResult(
+                    "ble.31", status: "succeeded",
+                    summary: "回包长度 \(content.count) 字节，锁状态 \(snapshot.isLocked == true ? "关锁" : "开锁")"
+                )
+            } else {
+                recordCapabilityResult(
+                    "ble.31", status: "failed", errorCode: "response_too_short",
+                    summary: "回包长度不足，仅 \(content.count) 字节"
+                )
             }
             send(.rideInfo, payload: [0x01])
 
@@ -407,11 +427,25 @@ final class BLEDeviceManager: NSObject, ObservableObject {
             if content.count >= 2 {
                 snapshot.scooterBatteryPercent = Int(content[0])
                 snapshot.rideMode = Int(content[1])
+                recordCapabilityResult(
+                    "ble.60", status: "succeeded",
+                    summary: "回包长度 \(content.count) 字节，电量 \(content[0])%，模式 \(content[1])"
+                )
+            } else {
+                recordCapabilityResult(
+                    "ble.60", status: "failed", errorCode: "response_too_short",
+                    summary: "回包长度不足，仅 \(content.count) 字节"
+                )
             }
             beginSystemInfoRead()
 
         case OmniCommand.unlock.rawValue:
             let success = content.first == 1
+            recordCapabilityResult(
+                "ble.05", status: success ? "succeeded" : "failed",
+                errorCode: success ? nil : "device_rejected",
+                summary: "回包长度 \(content.count) 字节，设备结果 \(content.first.map(String.init) ?? "无")"
+            )
             appendEvent("控制", success ? "设备确认开锁成功" : "设备返回开锁失败或超时")
             operationMessage = success ? "开锁成功，正在回读" : "开锁失败"
             if success {
@@ -424,6 +458,11 @@ final class BLEDeviceManager: NSObject, ObservableObject {
 
         case OmniCommand.lock.rawValue:
             let success = content.first == 1
+            recordCapabilityResult(
+                "ble.15", status: success ? "succeeded" : "failed",
+                errorCode: success ? nil : "device_rejected",
+                summary: "回包长度 \(content.count) 字节，设备结果 \(content.first.map(String.init) ?? "无")"
+            )
             appendEvent("控制", success ? "设备确认关锁成功" : "设备返回关锁失败或超时")
             operationMessage = success ? "关锁成功，正在回读" : "关锁失败"
             if success {
@@ -437,15 +476,37 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         case OmniCommand.settings.rawValue, OmniCommand.settings2.rawValue,
              OmniCommand.externalEquipment.rawValue, OmniCommand.rfid.rawValue,
              OmniCommand.power.rawValue, OmniCommand.clearRideData.rawValue:
+            let capabilityID: String
+            switch frame.command {
+            case OmniCommand.settings.rawValue: capabilityID = "ble.61"
+            case OmniCommand.settings2.rawValue: capabilityID = "ble.62"
+            case OmniCommand.externalEquipment.rawValue: capabilityID = "ble.81"
+            case OmniCommand.rfid.rawValue: capabilityID = "archive.rfid"
+            case OmniCommand.power.rawValue: capabilityID = "archive.power"
+            default: capabilityID = "ble.52"
+            }
+            recordCapabilityResult(
+                capabilityID, status: "succeeded",
+                summary: "回包长度 \(content.count) 字节，首字段 \(content.first.map(String.init) ?? "无")"
+            )
             appendEvent("设备", "命令 0x\(String(format: "%02X", frame.command)) 返回：\(content.first.map(String.init) ?? "无数据")")
             finishBusy("操作已返回")
 
         case OmniCommand.oldRideData.rawValue:
             oldRideDataHex = content.map { String(format: "%02X", $0) }.joined()
+            recordCapabilityResult(
+                "ble.51", status: "succeeded",
+                summary: "收到旧骑行数据 \(content.count) 字节，正文不进入指令中心"
+            )
             appendEvent("数据", content.isEmpty ? "设备没有返回旧骑行数据" : "已读取旧骑行数据，需确认后再清除")
             finishBusy("骑行数据读取完成")
 
         case OmniCommand.commandError.rawValue:
+            let error = content.first.map(String.init) ?? "unknown"
+            recordCapabilityResult(
+                "ble.10", status: "failed", errorCode: "ble_error_\(error)",
+                summary: "设备返回协议错误，回包长度 \(content.count) 字节，错误码 \(error)"
+            )
             fail("设备拒绝命令，错误码 \(content.first.map(String.init) ?? "未知")")
 
         case OmniCommand.transferStart.rawValue:
@@ -456,6 +517,10 @@ final class BLEDeviceManager: NSObject, ObservableObject {
 
         case OmniCommand.log.rawValue:
             deviceLogMode = true
+            recordCapabilityResult(
+                "archive.logs", status: "succeeded",
+                summary: "设备诊断日志流已开启，日志正文不进入指令中心"
+            )
             appendEvent("日志", "设备诊断日志流已开启")
 
         default:
@@ -499,6 +564,10 @@ final class BLEDeviceManager: NSObject, ObservableObject {
                 snapshot.capturedAt = Date()
                 send(.transferEnd, payload: [OmniCommand.transferStart.rawValue])
                 finishBusy("读取完成")
+                recordCapabilityResult(
+                    "archive.system_transfer", status: "succeeded",
+                    summary: "系统信息读取完成，共 \(systemTotalPages) 页，配置正文不进入指令中心"
+                )
                 appendEvent("状态", "系统信息读取完成，共 \(systemTotalPages) 页")
                 saveSnapshot()
             } else {
@@ -523,6 +592,11 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         if page == job.pageCount - 1 {
             transferJob = nil
             finishBusy("数据发送完成，等待设备应用")
+            recordCapabilityResult(
+                job.kind == .configuration ? "archive.system_transfer" : "archive.ota",
+                status: "unknown", errorCode: "awaiting_device_apply",
+                summary: "最后一页已发送，共 \(job.pageCount) 页，设备应用结果尚未确认"
+            )
             appendEvent(job.kind == .configuration ? "配置" : "OTA", "最后一页已写入设备")
             if job.kind == .configuration { DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.refreshAll() } }
         }
@@ -584,6 +658,22 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         let event = FieldLogEvent(category: category, message: message)
         events.insert(event, at: 0)
         if events.count > 500 { events.removeLast(events.count - 500) }
+    }
+
+    private func recordCapabilityResult(
+        _ capabilityID: String,
+        status: String,
+        errorCode: String? = nil,
+        summary: String
+    ) {
+        let now = Int(Date().timeIntervalSince1970)
+        capabilityResults[capabilityID] = RemoteCapabilityLatestResult(
+            status: status,
+            createdAt: now,
+            completedAt: now,
+            errorCode: errorCode,
+            rawResponseSummary: summary
+        )
     }
 
     private static func redactPrivacy(in text: String) -> String {

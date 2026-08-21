@@ -246,6 +246,7 @@ struct RemoteControlView: View {
 }
 
 struct CommandCenterView: View {
+    @EnvironmentObject private var device: BLEDeviceManager
     @EnvironmentObject private var remote: RemoteControlManager
 
     private let groupOrder = [
@@ -279,7 +280,10 @@ struct CommandCenterView: View {
     }
 
     private var groupedCatalog: [(String, [CapabilityDisplayItem])] {
-        let grouped = Dictionary(grouping: remote.capabilityCatalog, by: \.group)
+        let grouped = Dictionary(
+            grouping: remote.capabilityCatalog(bleResults: device.capabilityResults),
+            by: \.group
+        )
         return grouped.keys.sorted { lhs, rhs in
             (groupOrder.firstIndex(of: lhs) ?? groupOrder.count)
                 < (groupOrder.firstIndex(of: rhs) ?? groupOrder.count)
