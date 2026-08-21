@@ -44,6 +44,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 
 将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。定位质量阈值也由该文件集中配置，默认至少 4 颗卫星、HDOP 不高于 8、相邻可靠点估算速度不高于 25 米每秒。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。切换时还要确认旧服务在 `TimeoutStopSec` 内以 `Result=success` 停止，不能把 systemd 强制杀死当成正常退出。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
 
-2026 年 8 月 22 日部署基线为 Git revision `dae2fc8`。`emtb-iot-remote.service` 已通过远端 Python 3.12 的 49 项测试、内部 readiness、公网 revision、未认证 API 401、主页 200、源码哈希、告警数据库迁移与权限检查。设备在新版本上自动重连，真实活动 IoT 长连接下完成 `Result=success` 停止并再次恢复在线。旧源码、unit 和 SQLite 在线备份均保留为回滚材料。真实 W0、D1 回包与告警定位链仍待实车验收。
+2026 年 8 月 22 日部署基线为 Git revision `5002f2f`。`emtb-iot-remote.service` 已通过远端 Python 3.12 的 54 项测试、内部 readiness、公网 revision、未认证 API 401、主页 200、四个核心源码哈希、骑行与保留数据库迁移及权限检查。设备在新版本上完成两次自动重连，真实活动 IoT 长连接下停止仍为 `Result=success`。旧源码、unit 和 SQLite 在线备份均保留为回滚材料。真实 W0、D1、告警定位链和 60 秒轨迹仍待实车验收。
 
 不得提交真实 IMEI、配对码、令牌、控制私钥、数据库、日志或服务器现场记录。
