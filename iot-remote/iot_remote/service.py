@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import signal
 import time
 import uuid
 from dataclasses import dataclass
@@ -84,6 +85,25 @@ class RemoteService:
             return None
         return max(0, int(time.monotonic() - self.session.last_frame_at))
 
+    async def shutdown(self) -> None:
+        for task in self._timeout_tasks.values():
+            task.cancel()
+        if self._timeout_tasks:
+            await asyncio.gather(*self._timeout_tasks.values(), return_exceptions=True)
+        self._timeout_tasks.clear()
+
+        writer: Optional[asyncio.StreamWriter] = None
+        async with self._session_lock:
+            if self.session is not None:
+                writer = self.session.writer
+                self.session = None
+            self.database.update_vehicle_state(self.vehicle_id, online=0)
+            active = self.database.active_command(self.vehicle_id)
+            if active:
+                self._finish(active["id"], "unknown", "service_stopped")
+        if writer is not None:
+            await _close_writer(writer)
+
     async def handle_device(self, reader: asyncio.StreamReader,
                             writer: asyncio.StreamWriter) -> None:
         buffer = b""
@@ -116,11 +136,7 @@ class RemoteService:
                     active = self.database.active_command(self.vehicle_id)
                     if active:
                         self._finish(active["id"], "unknown", "connection_lost")
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except ConnectionError:
-                pass
+            await _close_writer(writer)
             if not authenticated:
                 LOGGER.warning("connection closed before target identity")
 
@@ -355,11 +371,7 @@ class RemoteService:
             f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii") + body
         )
         await writer.drain()
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except ConnectionError:
-            pass
+        await _close_writer(writer)
 
     async def _read_http(self, reader: asyncio.StreamReader) -> HTTPSpec:
         header = await reader.readuntil(b"\r\n\r\n")
@@ -534,10 +546,58 @@ class RemoteService:
 
 
 async def run_servers(service: RemoteService, tcp_host: str, tcp_port: int,
-                      http_host: str, http_port: int) -> None:
+                      http_host: str, http_port: int,
+                      stop_event: Optional[asyncio.Event] = None) -> None:
+    loop = asyncio.get_running_loop()
+    event = stop_event or asyncio.Event()
+    installed_signals: list[signal.Signals] = []
+    if stop_event is None:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(signum, event.set)
+                installed_signals.append(signum)
+            except (NotImplementedError, RuntimeError):
+                pass
+
     tcp_server = await asyncio.start_server(service.handle_device, tcp_host, tcp_port)
-    http_server = await asyncio.start_server(service.handle_http, http_host, http_port)
+    try:
+        http_server = await asyncio.start_server(service.handle_http, http_host, http_port)
+    except Exception:
+        tcp_server.close()
+        await tcp_server.wait_closed()
+        raise
     LOGGER.info("IoT TCP listening on %s:%s", tcp_host, tcp_port)
     LOGGER.info("HTTP API listening on %s:%s", http_host, http_port)
-    async with tcp_server, http_server:
-        await asyncio.gather(tcp_server.serve_forever(), http_server.serve_forever())
+    tasks: list[asyncio.Task[None]] = []
+    try:
+        async with tcp_server, http_server:
+            tasks = [
+                asyncio.create_task(tcp_server.serve_forever()),
+                asyncio.create_task(http_server.serve_forever()),
+            ]
+            await event.wait()
+    finally:
+        tcp_server.close()
+        http_server.close()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(
+            tcp_server.wait_closed(), http_server.wait_closed(), return_exceptions=True
+        )
+        await service.shutdown()
+        for signum in installed_signals:
+            loop.remove_signal_handler(signum)
+        LOGGER.info("IoT remote service stopped cleanly")
+
+
+async def _close_writer(writer: asyncio.StreamWriter, timeout: float = 2.0) -> None:
+    writer.close()
+    wait_closed = getattr(writer, "wait_closed", None)
+    if wait_closed is None:
+        return
+    try:
+        await asyncio.wait_for(wait_closed(), timeout=timeout)
+    except (asyncio.TimeoutError, ConnectionError):
+        LOGGER.warning("stream close did not finish cleanly")

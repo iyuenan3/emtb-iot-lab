@@ -11,6 +11,7 @@
 - 使用一次性配对码、读取令牌和 Secure Enclave P-256 请求签名。
 - 420 秒未收到有效设备报文时进入通信静默，720 秒时判定离线并禁用控制。
 - `/healthz` 返回部署版本、设备连接状态和最后有效报文年龄，部署后可独立读回版本。
+- `SIGINT` 与 `SIGTERM` 会先关闭监听和设备会话，把执行中命令标为结果未知，再干净退出。
 
 ## 本地运行
 
@@ -34,6 +35,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 
 ## 部署
 
-将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
+将 `.env.example` 复制为部署机上的 `.env`，填写真实设备和监听参数。发布时把 `EMTB_IOT_REVISION` 设置为当前 Git SHA。数据库目录权限应为 `700`，数据库文件与环境文件权限应为 `600`。部署前确认 TCP 端口的唯一监听者、反向代理路由和健康检查，切换时保留可恢复备份。切换时还要确认旧服务在 `TimeoutStopSec` 内以 `Result=success` 停止，不能把 systemd 强制杀死当成正常退出。部署完成必须从公网 `/iot/healthz` 读回相同 revision，不能只相信服务重启结果。
 
 不得提交真实 IMEI、配对码、令牌、控制私钥、数据库、日志或服务器现场记录。

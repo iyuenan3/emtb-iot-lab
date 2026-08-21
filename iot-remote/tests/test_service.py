@@ -30,6 +30,9 @@ class FakeWriter:
     def close(self):
         self.closed = True
 
+    async def wait_closed(self):
+        pass
+
 
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -129,6 +132,20 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(1.1)
         self.assertEqual(self.database.command(command["id"])["status"], "unknown")
         self.assertEqual(bytes(self.writer.data), sent)
+
+    async def test_shutdown_closes_session_and_marks_command_unknown(self):
+        command = self.create("vehicle.find_sound")
+        await self.service.dispatch_command(command["id"])
+        self.assertEqual(self.database.command(command["id"])["status"], "awaiting_result")
+
+        await self.service.shutdown()
+
+        self.assertTrue(self.writer.closed)
+        self.assertIsNone(self.service.session)
+        self.assertEqual(
+            self.database.command(command["id"])["error_code"], "service_stopped"
+        )
+        self.assertFalse(self.database.vehicle(self.service.vehicle_id)["online"])
 
     async def test_h0_updates_verified_vehicle_fields(self):
         await self.service.process_frame(Frame(
