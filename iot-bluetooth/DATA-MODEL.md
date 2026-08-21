@@ -155,7 +155,7 @@ Build 11 已在当前 `vehicle_state` 表落地 `desired_tracking_interval`、`c
 
 事件 UUID 全局唯一。超过 24 小时才上传的事件只保留审计，`state_effect_applied` 固定为 0。后续 H0、L0、L1 与 BLE 事件冲突时，使用时间更新且由设备网络回包确认的状态，并记录冲突。
 
-Build 10 先实现精简的 `ble_observations` 表，用于同步 BLE 主锁只读回读。字段包括观察 UUID、车辆、客户端、`lock_state`、观察时间、接收时间和是否应用。它不代表一次开关锁动作，也不会触发车辆控制；完整 BLE 操作事件仍按上表后续实现。
+Build 10 实现精简的 `ble_observations` 表，用于同步 BLE 主锁只读回读。字段包括观察 UUID、车辆、客户端、`lock_state`、观察时间、接收时间和是否应用。它不代表一次开关锁动作，也不会触发车辆控制。Build 15 已实现上表 `ble_events`，事件与锁、安全、骑行状态在同一 SQLite 事务中写入。
 
 ### 4.4 `audit_logs`
 

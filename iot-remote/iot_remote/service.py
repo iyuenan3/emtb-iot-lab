@@ -983,6 +983,40 @@ class RemoteService:
                 parsed_id, self.vehicle_id, client["id"], lock_state, observed_at
             )
             return {"observation": observation, "created": created}, 201 if created else 200
+        if request.method == "POST" and request.path == "/api/v1/ble-events":
+            self._verify_control_signature(request, client)
+            body = self._json(request)
+            event_id = body.get("event_id")
+            action = body.get("action")
+            ble_result = body.get("ble_result")
+            readback_lock_state = body.get("readback_lock_state")
+            device_operation_at = body.get("device_operation_at")
+            try:
+                parsed_id = str(uuid.UUID(event_id))
+            except (ValueError, TypeError, AttributeError):
+                raise APIError(400, "invalid_ble_event", "BLE 事件编号无效")
+            if request.headers.get("idempotency-key") != parsed_id:
+                raise APIError(
+                    400, "invalid_ble_event_idempotency",
+                    "BLE 事件的幂等键必须与事件编号一致",
+                )
+            if (action not in {"unlock", "lock"}
+                    or ble_result not in {"succeeded", "failed", "unknown"}
+                    or readback_lock_state not in {"locked", "unlocked"}
+                    or not isinstance(device_operation_at, int)
+                    or isinstance(device_operation_at, bool)):
+                raise APIError(400, "invalid_ble_event", "BLE 事件内容不完整")
+            if device_operation_at > int(time.time()) + 300:
+                raise APIError(400, "invalid_ble_event_time", "BLE 事件时间无效")
+            event, created = self.database.save_ble_event(
+                parsed_id, self.vehicle_id, client["id"], action, ble_result,
+                readback_lock_state, device_operation_at,
+            )
+            if created and event["state_effect_applied"]:
+                if self.is_online() and self.database.active_command(self.vehicle_id):
+                    self._policy_reconcile_pending = True
+                await self.reconcile_tracking_policy("ble_event")
+            return {"event": event, "created": created}, 201 if created else 200
         if request.method == "GET" and request.path == "/api/v1/commands":
             return {"commands": self.database.commands()}, 200
         prefix = "/api/v1/commands/"

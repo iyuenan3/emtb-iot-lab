@@ -16,6 +16,20 @@ struct RemoteControlView: View {
             } else {
                 pairingSection
             }
+            if remote.pendingBLEEventCount > 0 {
+                Section("BLE 事件队列") {
+                    LabeledContent("待补报", value: "\(remote.pendingBLEEventCount) 条")
+                    if remote.isPaired {
+                        Button("立即补报", systemImage: "arrow.triangle.2.circlepath") {
+                            Task { await remote.flushPendingBLEEvents() }
+                        }
+                        .disabled(remote.isBusy)
+                    } else {
+                        Text("完成远程配对后将自动补报，请勿卸载 App。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            }
             if remote.isBusy || !remote.message.isEmpty {
                 Section("状态") {
                     HStack {
@@ -191,6 +205,7 @@ struct RemoteControlView: View {
     private var lockSourceText: String {
         switch remote.vehicle?.lockStateSource {
         case "ble": return "BLE 回读"
+        case "ble_event": return "BLE 操作事件"
         case "iot_h0": return "IoT H0"
         case "remote_command": return "远程命令回包"
         default: return "旧状态或未知"

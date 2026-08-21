@@ -224,11 +224,22 @@ final class RemoteControlManager: ObservableObject {
     @Published private(set) var latestLocation: RemoteLocation?
     @Published private(set) var lastLocationReport: RemoteLocation?
     @Published private(set) var locations: [RemoteLocation] = []
+    @Published private(set) var pendingBLEEventCount = 0
     @Published private(set) var isBusy = false
     @Published private(set) var message = ""
+    private let pendingBLEEventStore = PendingBLEEventStore()
+    private var isFlushingBLEEvents = false
     private var lastAlertMarker: String?
     private var lastAlertAt: Date?
     private var lastAlertID: String?
+
+    init() {
+        do {
+            pendingBLEEventCount = try pendingBLEEventStore.load().count
+        } catch {
+            message = "BLE 事件队列无法读取，请保留 App 数据并联系维护"
+        }
+    }
 
     var isPaired: Bool {
         RemoteCredentialVault.clientID != nil && RemoteCredentialVault.readToken != nil
@@ -263,6 +274,7 @@ final class RemoteControlManager: ObservableObject {
             self.message = "配对成功"
             try await self.loadRemoteData()
         }
+        await flushPendingBLEEvents()
     }
 
     func refresh() async {
@@ -271,11 +283,58 @@ final class RemoteControlManager: ObservableObject {
             try await self.loadRemoteData()
             self.message = "远程状态已刷新"
         }
+        await flushPendingBLEEvents()
     }
 
     func poll() async {
         guard isPaired, !isBusy else { return }
         do { try await loadRemoteData() } catch { }
+        await flushPendingBLEEvents()
+    }
+
+    func enqueueBLEEvent(_ event: PendingBLEEvent) {
+        do {
+            pendingBLEEventCount = try pendingBLEEventStore.enqueue(event)
+            message = "BLE 操作事件已保存到本机"
+            Task { await flushPendingBLEEvents() }
+        } catch {
+            message = "BLE 操作事件保存失败，请勿卸载 App 并联系维护"
+        }
+    }
+
+    func flushPendingBLEEvents() async {
+        guard isPaired, !isBusy, !isFlushingBLEEvents else { return }
+        isFlushingBLEEvents = true
+        defer { isFlushingBLEEvents = false }
+        var uploaded = 0
+        var stateChanged = false
+        do {
+            while let event = try pendingBLEEventStore.load().first {
+                let response = try await request(
+                    path: "/api/v1/ble-events", method: "POST",
+                    body: event.requestBody, signed: true,
+                    idempotencyKey: event.id
+                )
+                let storedEvent = response["event"] as? [String: Any]
+                stateChanged = stateChanged
+                    || (storedEvent?["state_effect_applied"] as? Bool) == true
+                pendingBLEEventCount = try pendingBLEEventStore.remove(event.id)
+                uploaded += 1
+            }
+            if uploaded > 0 {
+                if stateChanged { try await loadRemoteData() }
+                message = "已补报 \(uploaded) 条 BLE 操作事件"
+            }
+        } catch {
+            do {
+                pendingBLEEventCount = try pendingBLEEventStore.load().count
+                if pendingBLEEventCount > 0 {
+                    message = "BLE 操作事件已在本机排队，网络恢复后自动补报"
+                }
+            } catch {
+                message = "BLE 事件队列无法读取，请保留 App 数据并联系维护"
+            }
+        }
     }
 
     func syncBLELockState(isLocked: Bool, observedAt: Date) async {

@@ -872,6 +872,115 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vehicle["lock_state"], "locked")
         self.assertEqual(vehicle["lock_state_source"], "ble")
 
+    async def test_signed_ble_event_applies_without_vehicle_lock_command(self):
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        code = self.database.create_pairing_code()
+        paired = self.database.complete_pairing(code, "iPhone", "token", public)
+        self.service._verify_control_signature = lambda request, client: None
+        event_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        body = json.dumps({
+            "event_id": event_id,
+            "action": "unlock",
+            "ble_result": "succeeded",
+            "readback_lock_state": "unlocked",
+            "device_operation_at": int(time.time()),
+        }).encode()
+        request = HTTPSpec(
+            "POST", "/api/v1/ble-events", "",
+            {"x-client-id": paired["client_id"], "authorization": "Bearer token",
+             "idempotency-key": event_id}, body,
+        )
+        payload, status = await self.service.route(request)
+        self.assertEqual(status, 201)
+        self.assertTrue(payload["event"]["state_effect_applied"])
+        self.assertEqual(self.database.vehicle(self.service.vehicle_id)["lock_state"], "unlocked")
+        self.assertIn(b",D1,60#", self.writer.data)
+        self.assertNotIn(b",L0,", self.writer.data)
+        self.assertNotIn(b",L1,", self.writer.data)
+        self.assertNotIn(b",R0,", self.writer.data)
+        self.assertEqual(
+            {command["command_type"] for command in self.database.commands()},
+            {"tracking.set_policy"},
+        )
+
+        repeated, repeated_status = await self.service.route(request)
+        self.assertEqual(repeated_status, 200)
+        self.assertFalse(repeated["created"])
+        self.assertEqual(len(self.database.commands()), 1)
+
+    async def test_signed_ble_event_applies_offline_without_downlink(self):
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        code = self.database.create_pairing_code()
+        paired = self.database.complete_pairing(code, "iPhone", "token", public)
+        self.service._verify_control_signature = lambda request, client: None
+        self.writer.closed = True
+        event_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        body = json.dumps({
+            "event_id": event_id,
+            "action": "lock",
+            "ble_result": "succeeded",
+            "readback_lock_state": "locked",
+            "device_operation_at": int(time.time()),
+        }).encode()
+        payload, status = await self.service.route(HTTPSpec(
+            "POST", "/api/v1/ble-events", "",
+            {"x-client-id": paired["client_id"], "authorization": "Bearer token",
+             "idempotency-key": event_id}, body,
+        ))
+        self.assertEqual(status, 201)
+        self.assertTrue(payload["event"]["state_effect_applied"])
+        self.assertEqual(self.database.commands(), [])
+        self.assertEqual(self.writer.data, b"")
+
+    async def test_stale_ble_event_is_accepted_for_audit_only(self):
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        code = self.database.create_pairing_code()
+        paired = self.database.complete_pairing(code, "iPhone", "token", public)
+        self.service._verify_control_signature = lambda request, client: None
+        event_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        body = json.dumps({
+            "event_id": event_id,
+            "action": "unlock",
+            "ble_result": "succeeded",
+            "readback_lock_state": "unlocked",
+            "device_operation_at": int(time.time()) - 90000,
+        }).encode()
+        payload, status = await self.service.route(HTTPSpec(
+            "POST", "/api/v1/ble-events", "",
+            {"x-client-id": paired["client_id"], "authorization": "Bearer token",
+             "idempotency-key": event_id}, body,
+        ))
+        self.assertEqual(status, 201)
+        self.assertFalse(payload["event"]["state_effect_applied"])
+        self.assertEqual(payload["event"]["ignored_reason"], "stale_over_24h")
+        self.assertEqual(self.database.vehicle(self.service.vehicle_id)["lock_state"], "unknown")
+        self.assertEqual(self.database.commands(), [])
+
+    async def test_ble_event_rejects_mismatched_idempotency_key(self):
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        code = self.database.create_pairing_code()
+        paired = self.database.complete_pairing(code, "iPhone", "token", public)
+        self.service._verify_control_signature = lambda request, client: None
+        event_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        body = json.dumps({
+            "event_id": event_id,
+            "action": "lock",
+            "ble_result": "succeeded",
+            "readback_lock_state": "locked",
+            "device_operation_at": int(time.time()),
+        }).encode()
+        with self.assertRaises(APIError) as context:
+            await self.service.route(HTTPSpec(
+                "POST", "/api/v1/ble-events", "",
+                {"x-client-id": paired["client_id"], "authorization": "Bearer token",
+                 "idempotency-key": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"}, body,
+            ))
+        self.assertEqual(context.exception.code, "invalid_ble_event_idempotency")
+        count = self.database.connection.execute(
+            "SELECT COUNT(*) FROM ble_events"
+        ).fetchone()[0]
+        self.assertEqual(count, 0)
+
     async def test_control_signature_and_nonce_replay(self):
         private_key = 7
         public = _scalar_multiply(private_key, (GX, GY))

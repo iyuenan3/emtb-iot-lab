@@ -108,6 +108,8 @@ Build 9 当前实现路径为 `GET /api/v1/locations?limit=500&since=<UTC秒>`�
 
 Build 10 当前实现 `POST /api/v1/ble-observations`。请求必须使用配对客户端的 P-256 私钥签名，只接受 24 小时内的 `locked` 或 `unlocked` 观察。观察 UUID 保证幂等，只有时间不早于服务器现有锁状态时才更新快照。该接口不创建命令、不发送 TCP 帧。
 
+Build 15 实现签名的 `POST /api/v1/ble-events`。请求必须使用规范 UUID，`Idempotency-Key` 必须与事件 UUID 一致。服务端先全局去重，再按时效、BLE 结果、动作与回读一致性、当前锁状态时间判定是否产生状态影响。无论是否生效都保留审计记录；只有新建且生效的在线事件才进入 D1 协调。
+
 Build 13 已实现 `GET /api/v1/trips`、`GET /api/v1/trips/{trip_id}`、`GET /api/v1/settings` 和签名的 `PUT /api/v1/settings/location-history`。保留期只接受 7 或 30，缩短到 7 天必须携带确认字段，并在下一次每日清理时生效。
 
 `GET /capabilities` 的每项至少包含 `capability_id`、中文名称、协议编号、通道、参数模式、风险等级、证据等级、是否可执行和禁用原因。App 与本地 BLE 能力目录按 `capability_id` 合并，但不能由服务端文本动态生成未经审核的操作按钮。
@@ -202,7 +204,7 @@ Build 11 已实现该协调器。成功开锁申请 60 秒，成功关锁申请 
 
 ### 7.4 BLE 事件同步
 
-BLE 开关锁成功后，App 使用独立事件 UUID 调用 `POST /ble-events`。服务端先按事件 UUID 去重，再校验操作时间、BLE 结果和回读锁状态：
+BLE 开关锁成功后，App 使用独立事件 UUID 调用 `POST /api/v1/ble-events`。服务端先按事件 UUID 去重，再校验操作时间、BLE 结果和回读锁状态：
 
 - 24 小时内的有效事件可以更新锁、安全和骑行状态。
 - 超过 24 小时的事件只写审计，不改变当前状态或触发 D1。

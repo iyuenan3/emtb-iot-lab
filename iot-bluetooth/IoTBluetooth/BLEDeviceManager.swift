@@ -5,6 +5,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     @Published private(set) var phase: ConnectionPhase = .idle
     @Published private(set) var snapshot = DeviceSnapshot()
     @Published private(set) var lockStateUpdatedAt: Date?
+    @Published private(set) var completedLockEvent: PendingBLEEvent?
     @Published private(set) var events: [FieldLogEvent] = []
     @Published private(set) var isAuthenticated = false
     @Published private(set) var isBusy = false
@@ -24,6 +25,14 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     private var shouldReconnect = false
     private var scanRequested = false
     private var busyGeneration = 0
+
+    private struct PendingLockMutation {
+        let action: String
+        let expectedLockState: String
+        let deviceOperationAt: Int
+        var responseConfirmed = false
+    }
+    private var pendingLockMutation: PendingLockMutation?
 
     private var systemReadActive = false
     private var systemTotalPages = 0
@@ -148,6 +157,10 @@ final class BLEDeviceManager: NSObject, ObservableObject {
             beginBusy("正在开锁", timeout: 6, timeoutMessage: "开锁命令未回包，已停止等待并回读状态", readBackLockOnTimeout: true)
             let userID: UInt32 = 1
             let timestamp = UInt32(Date().timeIntervalSince1970)
+            pendingLockMutation = PendingLockMutation(
+                action: "unlock", expectedLockState: "unlocked",
+                deviceOperationAt: Int(timestamp)
+            )
             let payload: [UInt8] = [0x01] + OmniProtocol.bytes(of: userID) + OmniProtocol.bytes(of: timestamp) + [0x00]
             send(.unlock, payload: payload)
             appendEvent("控制", "已发送开锁请求，等待设备结果")
@@ -161,6 +174,10 @@ final class BLEDeviceManager: NSObject, ObservableObject {
                 return
             }
             beginBusy("正在关锁", timeout: 6, timeoutMessage: "关锁命令未回包，已停止等待并回读状态", readBackLockOnTimeout: true)
+            pendingLockMutation = PendingLockMutation(
+                action: "lock", expectedLockState: "locked",
+                deviceOperationAt: Int(Date().timeIntervalSince1970)
+            )
             send(.lock, payload: [0x01])
             appendEvent("控制", "已发送关锁请求，等待设备结果")
         }
@@ -379,8 +396,10 @@ final class BLEDeviceManager: NSObject, ObservableObject {
                 snapshot.powerRaw = Int(content[0]) * 256 + Int(content[1])
                 snapshot.isLocked = (content[2] & 0x01) == 0
                 snapshot.capturedAt = Date()
-                lockStateUpdatedAt = snapshot.capturedAt
                 appendEvent("状态", snapshot.isLocked == true ? "设备当前为关锁状态" : "设备当前为开锁状态")
+                if !completePendingLockMutation(isLocked: snapshot.isLocked == true) {
+                    lockStateUpdatedAt = snapshot.capturedAt
+                }
             }
             send(.rideInfo, payload: [0x01])
 
@@ -395,6 +414,11 @@ final class BLEDeviceManager: NSObject, ObservableObject {
             let success = content.first == 1
             appendEvent("控制", success ? "设备确认开锁成功" : "设备返回开锁失败或超时")
             operationMessage = success ? "开锁成功，正在回读" : "开锁失败"
+            if success {
+                pendingLockMutation?.responseConfirmed = true
+            } else {
+                pendingLockMutation = nil
+            }
             send(.unlock, payload: [0x02])
             finishMutationWithReadback()
 
@@ -402,6 +426,11 @@ final class BLEDeviceManager: NSObject, ObservableObject {
             let success = content.first == 1
             appendEvent("控制", success ? "设备确认关锁成功" : "设备返回关锁失败或超时")
             operationMessage = success ? "关锁成功，正在回读" : "关锁失败"
+            if success {
+                pendingLockMutation?.responseConfirmed = true
+            } else {
+                pendingLockMutation = nil
+            }
             send(.lock, payload: [0x02])
             finishMutationWithReadback()
 
@@ -507,6 +536,23 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
+    private func completePendingLockMutation(isLocked: Bool) -> Bool {
+        guard let pending = pendingLockMutation, pending.responseConfirmed else { return false }
+        pendingLockMutation = nil
+        let readbackLockState = isLocked ? "locked" : "unlocked"
+        guard readbackLockState == pending.expectedLockState else {
+            appendEvent("控制", "命令成功回包与锁状态回读不一致，未生成远程事件")
+            return false
+        }
+        completedLockEvent = PendingBLEEvent(
+            action: pending.action,
+            readbackLockState: readbackLockState,
+            deviceOperationAt: pending.deviceOperationAt
+        )
+        appendEvent("同步", "BLE 操作结果已生成持久化事件")
+        return true
+    }
+
     private func saveSnapshot() {
         var safeSnapshot = snapshot
         safeSnapshot.bikeNumber = "[已脱敏]"
@@ -574,6 +620,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
             self.operationMessage = timeoutMessage
             self.appendEvent("超时", timeoutMessage)
             if readBackLockOnTimeout, self.isReady {
+                self.pendingLockMutation = nil
                 self.refreshAll()
             }
         }
@@ -594,6 +641,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         operationMessage = message
         busyGeneration += 1
         isBusy = false
+        pendingLockMutation = nil
         if !isAuthenticated { phase = .failed }
         appendEvent("错误", message)
     }
@@ -605,6 +653,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         isAuthenticated = false
         busyGeneration += 1
         isBusy = false
+        pendingLockMutation = nil
         systemReadActive = false
         deviceLogMode = false
         transferJob = nil

@@ -4,7 +4,7 @@
 
 | 范围 | 命令 | 当前覆盖 |
 | --- | --- | --- |
-| 远程服务 | `cd ../iot-remote && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 60 项，覆盖签名、BLE 状态同步、数据库、D0 转换与去重、定位质量、D1、新会话协调、布防告警、骑行生命周期、历史与保留清理、离线停车基线、两次重连定位、重复定位拒绝、一致性拒绝、超时不重试、命令状态机、通信静默、部署版本读回，以及真实活动 TCP 设备连接下的优雅停机 |
+| 远程服务 | `cd ../iot-remote && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 65 项，覆盖签名、BLE 状态同步、BLE 事件幂等、时效、冲突与离线下行抑制、数据库、D0 转换与去重、定位质量、D1、新会话协调、布防告警、骑行生命周期、历史与保留清理、离线停车基线、两次重连定位、重复定位拒绝、一致性拒绝、超时不重试、命令状态机、通信静默、部署版本读回，以及真实活动 TCP 设备连接下的优雅停机 |
 | iOS 编译 | `xcodebuild -project IoTBluetooth.xcodeproj -scheme IoTBluetooth -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build` | Swift 类型检查、资源和工程配置 |
 
 iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 CoreBluetooth、Face ID、真机网络或车辆物理动作正确。
@@ -16,6 +16,8 @@ iOS 工程目前没有 XCTest 或 XCUITest Target。自动构建不能证明 Cor
 同日，Build 13 完成签名构建并成功安装，自动启动因设备锁屏被系统拒绝。远端 revision `5002f2f` 在 Python 3.12 通过 54 项测试，SQLite 骑行、设置和清理迁移及四个核心源码哈希一致，公网健康接口读回相同 revision，未认证 API 为 401，站点首页为 200。设备完成两次自动重连，活动长连接下停止仍为 `Result=success`，回滚源码、unit 和 SQLite 备份齐全。真实 60 秒轨迹、历史页面与保留设置交互继续待人工验收。
 
 Build 14 完成无签名与签名真机目标编译、真机安装和系统启动。revision `5d0ef70` 在本机与远端 Python 3.12 均通过 60 项测试；SQLite 离线基线与告警比较迁移、两个 unit 阈值、四个核心源码哈希、权限和回滚材料全部核对通过。设备完成两次自动重连，活动长连接停止为 `Result=success`；公网读回相同 revision，未认证 API 为 401，站点首页为 200。协议模拟覆盖两次可信定位创建推断告警、重复或不一致位置拒绝、D0 超时同一会话不重试，以及已有 D1 在途时串行等待。以上证据不代表默认 200 米与 75 米阈值已经完成户外校准。
+
+Build 15 候选代码在本机通过 65 项测试和无签名真机目标编译。新增测试覆盖 BLE 事件全局去重、24 小时外只审计、旧状态不覆盖新状态、失败或回读不一致不生效、IoT 离线无下行，以及在线时只创建 `tracking.set_policy`。真机队列持久化、断网重启和联网补报仍待部署后验收。
 
 ## 已完成实车验收
 
@@ -30,6 +32,7 @@ Build 14 完成无签名与签名真机目标编译、真机安装和系统启�
 - Build 12 的 BLE 状态优先、冲突提示、服务器同步、断开回退、D1 状态显示、布防和告警页面。
 - Build 13 的 60 秒轨迹、骑行历史地图、估算距离和保留设置交互。
 - Build 14 的真实断网、重连双定位、推断告警文案和户外阈值校准。
+- Build 15 的 BLE 事件在线上传、手机断网后重启保留、联网补报和队列计数。
 - 远程关锁的新版 App 端交互。
 - 真实 D0 有效坐标、MapKit 标记、时间与精度字段展示。
 - BLE 高级设置、RFID、外部锁、OTA 等逐项能力。

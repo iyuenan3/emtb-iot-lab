@@ -460,6 +460,60 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(vehicle["lock_state"], "locked")
         self.assertEqual(vehicle["lock_state_source"], "ble")
 
+    def test_ble_event_is_durable_idempotent_and_only_new_success_changes_state(self):
+        code = self.database.create_pairing_code()
+        public = b"\x04" + GX.to_bytes(32, "big") + GY.to_bytes(32, "big")
+        client = self.database.complete_pairing(code, "iPhone", "token", public)
+        now = int(time.time())
+
+        unlocked, created = self.database.save_ble_event(
+            "44444444-4444-4444-8444-444444444444", self.vehicle_id,
+            client["client_id"], "unlock", "succeeded", "unlocked", now - 10,
+        )
+        repeated, repeated_created = self.database.save_ble_event(
+            unlocked["id"], self.vehicle_id, client["client_id"],
+            "unlock", "succeeded", "unlocked", now - 10,
+        )
+        self.assertTrue(created)
+        self.assertTrue(unlocked["state_effect_applied"])
+        self.assertFalse(repeated_created)
+        self.assertEqual(repeated["id"], unlocked["id"])
+        active_trip_id = self.database.vehicle(self.vehicle_id)["active_trip_id"]
+        self.assertIsNotNone(active_trip_id)
+
+        stale, _ = self.database.save_ble_event(
+            "55555555-5555-4555-8555-555555555555", self.vehicle_id,
+            client["client_id"], "lock", "succeeded", "locked", now - 90000,
+        )
+        older, _ = self.database.save_ble_event(
+            "66666666-6666-4666-8666-666666666666", self.vehicle_id,
+            client["client_id"], "lock", "succeeded", "locked", now - 11,
+        )
+        failed, _ = self.database.save_ble_event(
+            "77777777-7777-4777-8777-777777777777", self.vehicle_id,
+            client["client_id"], "lock", "failed", "locked", now - 5,
+        )
+        mismatch, _ = self.database.save_ble_event(
+            "88888888-8888-4888-8888-888888888888", self.vehicle_id,
+            client["client_id"], "lock", "succeeded", "unlocked", now - 4,
+        )
+        self.assertEqual(stale["ignored_reason"], "stale_over_24h")
+        self.assertEqual(older["ignored_reason"], "superseded_by_newer_state")
+        self.assertEqual(failed["ignored_reason"], "result_not_succeeded")
+        self.assertEqual(mismatch["ignored_reason"], "readback_mismatch")
+        self.assertEqual(self.database.vehicle(self.vehicle_id)["lock_state"], "unlocked")
+
+        locked, _ = self.database.save_ble_event(
+            "99999999-9999-4999-8999-999999999999", self.vehicle_id,
+            client["client_id"], "lock", "succeeded", "locked", now - 1,
+        )
+        vehicle = self.database.vehicle(self.vehicle_id)
+        self.assertTrue(locked["state_effect_applied"])
+        self.assertEqual(vehicle["lock_state"], "locked")
+        self.assertEqual(vehicle["lock_state_source"], "ble_event")
+        self.assertIsNone(vehicle["active_trip_id"])
+        self.assertEqual(self.database.trip(active_trip_id)["status"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

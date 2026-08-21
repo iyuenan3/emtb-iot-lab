@@ -82,6 +82,13 @@ CREATE TABLE IF NOT EXISTS ble_observations (
   client_id TEXT NOT NULL REFERENCES clients(id), lock_state TEXT NOT NULL,
   observed_at INTEGER NOT NULL, received_at INTEGER NOT NULL, applied INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ble_events (
+  id TEXT PRIMARY KEY, vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  client_id TEXT NOT NULL REFERENCES clients(id), action TEXT NOT NULL,
+  ble_result TEXT NOT NULL, readback_lock_state TEXT NOT NULL,
+  device_operation_at INTEGER NOT NULL, received_at INTEGER NOT NULL,
+  state_effect_applied INTEGER NOT NULL, ignored_reason TEXT
+);
 CREATE TABLE IF NOT EXISTS alarms (
   id TEXT PRIMARY KEY, vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
   alarm_type TEXT NOT NULL, state TEXT NOT NULL,
@@ -402,40 +409,50 @@ class Database:
         if lock_state not in {"locked", "unlocked"}:
             raise ValueError("锁状态无效")
         with self.connection:
-            if lock_state == "unlocked":
-                active_alarms = self.connection.execute(
-                    "SELECT id FROM alarms WHERE vehicle_id=? AND state='active'",
-                    (vehicle_id,),
-                ).fetchall()
-                self.connection.execute(
-                    "UPDATE alarms SET state='cleared',cleared_at=? "
-                    "WHERE vehicle_id=? AND state='active'",
-                    (updated_at, vehicle_id),
+            self._apply_confirmed_lock_state(
+                vehicle_id, lock_state, source, updated_at, unlock_user,
+                unlock_timestamp, command_id,
+            )
+
+    def _apply_confirmed_lock_state(self, vehicle_id: str, lock_state: str,
+                                    source: str, updated_at: int,
+                                    unlock_user: Optional[str] = None,
+                                    unlock_timestamp: Optional[str] = None,
+                                    command_id: Optional[str] = None) -> None:
+        if lock_state == "unlocked":
+            active_alarms = self.connection.execute(
+                "SELECT id FROM alarms WHERE vehicle_id=? AND state='active'",
+                (vehicle_id,),
+            ).fetchall()
+            self.connection.execute(
+                "UPDATE alarms SET state='cleared',cleared_at=? "
+                "WHERE vehicle_id=? AND state='active'",
+                (updated_at, vehicle_id),
+            )
+            self.connection.execute(
+                "UPDATE vehicle_state SET lock_state='unlocked',security_state='disarmed',"
+                "grace_until=NULL,active_alarm_id=NULL,active_unlock_user=?,"
+                "active_unlock_timestamp=?,lock_state_source=?,lock_state_updated_at=?,"
+                "offline_since=NULL,parked_location_id=NULL,updated_at=? WHERE vehicle_id=?",
+                (unlock_user, unlock_timestamp, source, updated_at, updated_at, vehicle_id),
+            )
+            for alarm in active_alarms:
+                self._insert_alarm_event(
+                    vehicle_id, alarm["id"], "cleared_by_unlock", {}, updated_at
                 )
-                self.connection.execute(
-                    "UPDATE vehicle_state SET lock_state='unlocked',security_state='disarmed',"
-                    "grace_until=NULL,active_alarm_id=NULL,active_unlock_user=?,"
-                    "active_unlock_timestamp=?,lock_state_source=?,lock_state_updated_at=?,"
-                    "offline_since=NULL,parked_location_id=NULL,updated_at=? WHERE vehicle_id=?",
-                    (unlock_user, unlock_timestamp, source, updated_at, updated_at, vehicle_id),
-                )
-                for alarm in active_alarms:
-                    self._insert_alarm_event(
-                        vehicle_id, alarm["id"], "cleared_by_unlock", {}, updated_at
-                    )
-                self._ensure_active_trip(
-                    vehicle_id, updated_at, command_id, recovered_after_restart=False
-                )
-            else:
-                self._finish_active_trip(vehicle_id, updated_at, command_id)
-                self.connection.execute(
-                    "UPDATE vehicle_state SET lock_state='locked',"
-                    "security_state=CASE WHEN active_alarm_id IS NULL "
-                    "THEN 'disarmed' ELSE 'alarm_active' END,"
-                    "grace_until=NULL,lock_state_source=?,lock_state_updated_at=?,updated_at=? "
-                    "WHERE vehicle_id=?",
-                    (source, updated_at, updated_at, vehicle_id),
-                )
+            self._ensure_active_trip(
+                vehicle_id, updated_at, command_id, recovered_after_restart=False
+            )
+        else:
+            self._finish_active_trip(vehicle_id, updated_at, command_id)
+            self.connection.execute(
+                "UPDATE vehicle_state SET lock_state='locked',"
+                "security_state=CASE WHEN active_alarm_id IS NULL "
+                "THEN 'disarmed' ELSE 'alarm_active' END,"
+                "grace_until=NULL,lock_state_source=?,lock_state_updated_at=?,updated_at=? "
+                "WHERE vehicle_id=?",
+                (source, updated_at, updated_at, vehicle_id),
+            )
 
     def _ensure_active_trip(self, vehicle_id: str, started_at: int,
                             command_id: Optional[str],
@@ -978,6 +995,60 @@ class Database:
         result = dict(row)
         result["applied"] = bool(result["applied"])
         return result, True
+
+    def save_ble_event(self, event_id: str, vehicle_id: str, client_id: str,
+                       action: str, ble_result: str, readback_lock_state: str,
+                       device_operation_at: int) -> tuple[dict[str, Any], bool]:
+        existing = self.connection.execute(
+            "SELECT * FROM ble_events WHERE id=?", (event_id,)
+        ).fetchone()
+        if existing:
+            return self._ble_event_dict(existing), False
+
+        received_at = int(time.time())
+        expected_lock_state = {"unlock": "unlocked", "lock": "locked"}.get(action)
+        ignored_reason: Optional[str] = None
+        if device_operation_at < received_at - 86400:
+            ignored_reason = "stale_over_24h"
+        elif ble_result != "succeeded":
+            ignored_reason = "result_not_succeeded"
+        elif expected_lock_state != readback_lock_state:
+            ignored_reason = "readback_mismatch"
+        else:
+            current = self.connection.execute(
+                "SELECT lock_state_updated_at FROM vehicle_state WHERE vehicle_id=?",
+                (vehicle_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(vehicle_id)
+            if (current["lock_state_updated_at"] is not None
+                    and device_operation_at <= current["lock_state_updated_at"]):
+                ignored_reason = "superseded_by_newer_state"
+
+        applied = ignored_reason is None
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO ble_events(id,vehicle_id,client_id,action,ble_result,"
+                "readback_lock_state,device_operation_at,received_at,state_effect_applied,"
+                "ignored_reason) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (event_id, vehicle_id, client_id, action, ble_result,
+                 readback_lock_state, device_operation_at, received_at,
+                 int(applied), ignored_reason),
+            )
+            if applied:
+                self._apply_confirmed_lock_state(
+                    vehicle_id, readback_lock_state, "ble_event", device_operation_at
+                )
+        row = self.connection.execute(
+            "SELECT * FROM ble_events WHERE id=?", (event_id,)
+        ).fetchone()
+        return self._ble_event_dict(row), True
+
+    @staticmethod
+    def _ble_event_dict(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["state_effect_applied"] = bool(result["state_effect_applied"])
+        return result
 
     def save_location(self, vehicle_id: str, *, source: str,
                       device_timestamp: Optional[int], valid: bool,

@@ -22,6 +22,10 @@ struct ContentView: View {
             guard let updatedAt, let isLocked = device.snapshot.isLocked, remote.isPaired else { return }
             Task { await remote.syncBLELockState(isLocked: isLocked, observedAt: updatedAt) }
         }
+        .onChange(of: device.completedLockEvent) { _, event in
+            guard let event else { return }
+            remote.enqueueBLEEvent(event)
+        }
     }
 }
 
