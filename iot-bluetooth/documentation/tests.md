@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | iOS 源码守卫 | `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | Build 22 共 8 项通过 |
 | iOS 无签名编译 | `xcodebuild -project IoTBluetooth.xcodeproj -scheme IoTBluetooth -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build` | Build 22 通过 |
+| iOS 签名与安装 | 签名 `xcodebuild`、`devicectl device install app`、安装版本读回 | Build 22 通过，未启动 App |
 
 源码守卫固定以下边界：
 
@@ -26,7 +27,7 @@
 
 ## 人工验收顺序
 
-1. 签名编译并安装 Build 22，确认版本读回。
+1. 打开已经读回为 Build 22 的 App，检查页面和诊断分享入口。
 2. 只连接和认证，不按控制按钮，再手动断开，观察至少 15 秒。
 3. 新连接中只执行一次开锁，等待 App 主动断开，再观察至少 15 秒。
 4. 车辆完全静止后，新连接中只执行一次关锁，等待 App 主动断开，再观察至少 15 秒。

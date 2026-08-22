@@ -70,7 +70,7 @@ cd ../iot-tcp-lab
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 ```
 
-Build 21 已安装到开发 iPhone，但用户现场反馈开锁和关锁均未产生车辆动作。Build 22 移除了 Face ID 异步授权路径，并增加可分享的脱敏控制链诊断，等待重新安装后分步复测。远程控制、自动状态读取、自动重连、BLE 事件上传和维护能力仍未进入 App。线上服务 revision `469f154b75bb243e61cd1dd3f291fde0256bb7bb` 保持原状，本轮没有重新部署。具体边界见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
+Build 21 安装后，用户现场反馈开锁和关锁均未产生车辆动作。Build 22 已移除 Face ID 异步授权路径，增加可分享的脱敏控制链诊断，并完成签名构建、覆盖安装和 Build 22 读回；App 尚未启动，也没有发送车辆指令。远程控制、自动状态读取、自动重连、BLE 事件上传和维护能力仍未进入 App。线上服务 revision `469f154b75bb243e61cd1dd3f291fde0256bb7bb` 保持原状，本轮没有重新部署。具体边界见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
 
 ## 安全与隐私
 

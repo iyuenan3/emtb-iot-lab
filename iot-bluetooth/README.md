@@ -39,6 +39,6 @@ xcodebuild -project IoTBluetooth.xcodeproj \
 
 ## 实车验收边界
 
-Build 21 已安装，但用户现场反馈开锁和关锁均未产生车辆动作。Build 22 移除了身份验证异步路径，并在“诊断记录”中增加“分享脱敏诊断”。重新安装后必须分步验收：先只连接和断开，确认仪表不重启；再单独验证一次开锁；最后从新的连接单独验证一次关锁。任一步出现仪表重启、状态反向或物理状态不一致，应立即关闭 App 蓝牙并停止测试。
+Build 21 安装后，用户现场反馈开锁和关锁均未产生车辆动作。Build 22 已移除身份验证异步路径，在“诊断记录”中增加“分享脱敏诊断”，并完成签名构建、覆盖安装和版本读回。App 尚未启动。首次打开后必须分步验收：先只连接和断开，确认仪表不重启；再单独验证一次开锁；最后从新的连接单独验证一次关锁。任一步出现仪表重启、状态反向或物理状态不一致，应立即关闭 App 蓝牙并停止测试。
 
 详细边界见 [实现状态](IMPLEMENTATION-STATUS.md)、[架构](documentation/architecture.md)、[关键流程](documentation/flows.md)、[权限与安全](documentation/permissions.md)和[测试策略](documentation/tests.md)。
