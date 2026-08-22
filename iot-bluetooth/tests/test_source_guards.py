@@ -9,6 +9,7 @@ MANAGER = (SOURCE / "BLEDeviceManager.swift").read_text()
 CONTENT = (SOURCE / "ContentView.swift").read_text()
 PROTOCOL = (SOURCE / "OmniProtocol.swift").read_text()
 APP = (SOURCE / "IoTBluetoothApp.swift").read_text()
+INFO = (SOURCE / "Info.plist").read_text()
 PROJECT = (ROOT / "IoTBluetooth.xcodeproj" / "project.pbxproj").read_text()
 
 
@@ -56,11 +57,19 @@ class SourceGuardTests(unittest.TestCase):
             r"(?s)private func finishActionAfterReceipt\(\).*?requestDisconnect\(\)",
         )
 
-    def test_sensitive_controls_require_owner_authentication(self):
-        self.assertRegex(MANAGER, r"func unlockWithOwnerAuthentication\(\) async")
-        self.assertRegex(MANAGER, r"func lockWithOwnerAuthentication\(\) async")
+    def test_controls_do_not_require_biometric_authentication(self):
+        self.assertRegex(MANAGER, r"func unlock\(\)")
+        self.assertRegex(MANAGER, r"func lock\(\)")
         self.assertRegex(MANAGER, r"private func startAction\(")
-        self.assertIn(".deviceOwnerAuthentication", MANAGER)
+        for forbidden in (
+            "LocalAuthentication",
+            "deviceOwnerAuthentication",
+            "WithOwnerAuthentication",
+            "NSFaceIDUsageDescription",
+        ):
+            self.assertNotIn(forbidden, MANAGER + CONTENT + APP + INFO)
+        self.assertIn("device.unlock()", CONTENT)
+        self.assertIn("device.lock()", CONTENT)
         self.assertNotRegex(CONTENT, r"device\.startAction\(")
 
     def test_ui_never_claims_physical_success(self):
@@ -70,8 +79,13 @@ class SourceGuardTests(unittest.TestCase):
         self.assertIn("物理结果优先", CONTENT)
         self.assertIn("每次蓝牙连接只允许一个动作", CONTENT)
 
-    def test_build_number_is_21(self):
-        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 21;"), 2)
+    def test_diagnostics_are_shareable(self):
+        self.assertIn("var diagnosticReport: String", MANAGER)
+        self.assertIn("ShareLink(item: device.diagnosticReport)", CONTENT)
+        self.assertIn("分享脱敏诊断", CONTENT)
+
+    def test_build_number_is_22(self):
+        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 22;"), 2)
 
 
 if __name__ == "__main__":

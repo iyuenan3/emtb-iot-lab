@@ -98,7 +98,7 @@ struct ContentView: View {
                     color: .orange,
                     enabled: device.canStartAction
                 ) {
-                    Task { await device.unlockWithOwnerAuthentication() }
+                    device.unlock()
                 }
                 HoldControlButton(
                     title: "关锁",
@@ -106,7 +106,7 @@ struct ContentView: View {
                     color: .indigo,
                     enabled: device.canStartAction
                 ) {
-                    Task { await device.lockWithOwnerAuthentication() }
+                    device.lock()
                 }
             }
 
@@ -185,6 +185,13 @@ struct ContentView: View {
 
     private var diagnostics: some View {
         DisclosureGroup("诊断记录") {
+            ShareLink(item: device.diagnosticReport) {
+                Label("分享脱敏诊断", systemImage: "square.and.arrow.up")
+            }
+            .disabled(device.events.isEmpty)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 8)
+
             if device.events.isEmpty {
                 Text("暂无记录")
                     .font(.footnote)
@@ -224,11 +231,9 @@ struct ContentView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     Button(device.deviceKeyStored ? "更新设备密钥" : "保存设备密钥") {
-                        Task {
-                            if await device.saveDeviceKeyWithOwnerAuthentication(keyInput) {
-                                keyInput = ""
-                                showKeySettings = false
-                            }
+                        if device.saveDeviceKey(keyInput) {
+                            keyInput = ""
+                            showKeySettings = false
                         }
                     }
                     .disabled(keyInput.utf8.count != 8 || device.isOperationBusy)
@@ -236,11 +241,9 @@ struct ContentView: View {
                 if device.deviceKeyStored {
                     Section {
                         Button("删除本机设备密钥", role: .destructive) {
-                            Task {
-                                await device.deleteDeviceKeyWithOwnerAuthentication()
-                                keyInput = ""
-                                showKeySettings = false
-                            }
+                            device.deleteDeviceKey()
+                            keyInput = ""
+                            showKeySettings = false
                         }
                         .disabled(device.isOperationBusy)
                     }
@@ -323,6 +326,6 @@ private struct HoldControlButton: View {
         .allowsHitTesting(enabled)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("长按\(title)")
-        .accessibilityHint("持续按住 1.2 秒后进行设备所有者验证")
+        .accessibilityHint("持续按住 1.2 秒后发送一次\(title)请求")
     }
 }

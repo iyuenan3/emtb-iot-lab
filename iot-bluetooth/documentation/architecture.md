@@ -2,7 +2,7 @@
 
 ## 产品边界
 
-Build 21 是单车、单用户、纯 BLE 的 iPhone 车钥匙。App 不访问网络，不保存服务器凭据，不展示远程状态，不自动读取车辆状态。
+Build 22 是单车、单用户、纯 BLE 的 iPhone 车钥匙。App 不访问网络，不保存服务器凭据，不展示远程状态，不自动读取车辆状态，也不调用 Face ID。
 
 ## 当前构建目标
 
@@ -15,7 +15,7 @@ Build 21 是单车、单用户、纯 BLE 的 iPhone 车钥匙。App 不访问网
 | `Models.swift` | 连接阶段、控制动作、结果和设备配置 |
 | `KeychainStore.swift` | 设备密钥的本机 Keychain 存储与旧值迁移 |
 
-`RemoteControlManager.swift`、`RemoteControlView.swift` 和 `PendingBLEEventStore.swift` 仍保留在 Git 历史和工作树中，但不在 Xcode Target 中，不会编译进 App。
+`RemoteControlManager.swift`、`RemoteControlView.swift` 和 `PendingBLEEventStore.swift` 仍保留在 Git 历史和工作树中，但不在 Xcode Target 中，不会编译进 App。控制链诊断只包含脱敏事件，可由用户主动分享。
 
 ## 数据流
 

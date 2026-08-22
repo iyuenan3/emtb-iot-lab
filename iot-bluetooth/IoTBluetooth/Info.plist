@@ -8,8 +8,6 @@
     <string>$(DEVICE_IMEI)</string>
     <key>IoTDeviceBLEMAC</key>
     <string>$(DEVICE_BLE_MAC)</string>
-	<key>NSFaceIDUsageDescription</key>
-	<string>用于确认附近蓝牙开锁、关锁和设备密钥操作</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>

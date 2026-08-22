@@ -24,4 +24,4 @@ NUS GATT UUID 固定定义在 `IoTBluetooth/Models.swift`。真实设备配置�
 
 ## 已取消的 App 配置
 
-Build 21 不使用远程服务地址、配对令牌、Secure Enclave 控制私钥、维护密钥、服务器配置、APN 或 OTA 文件。
+Build 22 不使用远程服务地址、配对令牌、Secure Enclave 控制私钥、Face ID、维护密钥、服务器配置、APN 或 OTA 文件。

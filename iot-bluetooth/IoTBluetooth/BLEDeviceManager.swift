@@ -1,7 +1,6 @@
 import Combine
 import CoreBluetooth
 import Foundation
-import LocalAuthentication
 
 final class BLEDeviceManager: NSObject, ObservableObject {
     @Published private(set) var phase: ConnectionPhase = .idle
@@ -9,7 +8,6 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     @Published private(set) var lastOutcome: ControlOutcome = .none
     @Published private(set) var rssi: Int?
     @Published private(set) var deviceKeyStored = false
-    @Published private(set) var isAuthorizing = false
     @Published private(set) var isOperating = false
     @Published private(set) var events: [FieldLogEvent] = []
 
@@ -18,12 +16,34 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     }
 
     var isOperationBusy: Bool {
-        isAuthorizing || isOperating
+        isOperating
     }
 
     var canStartAction: Bool {
         isReady && !isOperationBusy && !actionAttemptedThisConnection && pendingWrite == nil
     }
+
+    var diagnosticReport: String {
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        var lines = [
+            "eMTB BLE diagnostic",
+            "build=\(build)",
+            "phase=\(phase.rawValue)",
+            "ready=\(isReady)",
+            "operating=\(isOperating)",
+            "message=\(operationMessage)"
+        ]
+        lines.append(contentsOf: events.reversed().map { event in
+            "\(Self.diagnosticTimestamp.string(from: event.timestamp)) [\(event.category)] \(event.message)"
+        })
+        return lines.joined(separator: "\n")
+    }
+
+    private static let diagnosticTimestamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     private enum WritePurpose {
         case authentication
@@ -105,37 +125,46 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         requestDisconnect()
     }
 
-    func unlockWithOwnerAuthentication() async {
-        await performAuthorized("确认附近蓝牙开锁") {
-            self.startAction(.unlock)
-        }
+    func unlock() {
+        appendEvent("交互", "用户完成开锁长按")
+        startAction(.unlock)
     }
 
-    func lockWithOwnerAuthentication() async {
-        await performAuthorized("车辆必须完全静止，确认附近蓝牙关锁") {
-            self.startAction(.lock)
-        }
+    func lock() {
+        appendEvent("交互", "用户完成关锁长按")
+        startAction(.lock)
     }
 
-    func saveDeviceKeyWithOwnerAuthentication(_ key: String) async -> Bool {
-        await performAuthorized("确认保存车辆蓝牙密钥") {
-            try self.validateDeviceKey(key)
+    func saveDeviceKey(_ key: String) -> Bool {
+        guard !isOperating else {
+            operationMessage = "车辆控制进行中，不能修改设备密钥"
+            return false
+        }
+        do {
+            try validateDeviceKey(key)
             try DeviceKeyVault.save(key)
-            self.refreshDeviceKeyState()
-            self.operationMessage = "设备密钥已保存"
-            self.appendEvent("安全", "设备密钥已保存到本机 Keychain")
+            refreshDeviceKeyState()
+            operationMessage = "设备密钥已保存"
+            appendEvent("安全", "设备密钥已保存到本机 Keychain")
+            return true
+        } catch {
+            operationMessage = error.localizedDescription
+            appendEvent("安全", "设备密钥保存失败")
+            return false
         }
     }
 
-    func deleteDeviceKeyWithOwnerAuthentication() async {
-        _ = await performAuthorized("确认删除车辆蓝牙密钥") {
-            DeviceKeyVault.delete()
-            self.refreshDeviceKeyState()
-            self.disconnect()
-            self.phase = .needsDeviceKey
-            self.operationMessage = "设备密钥已删除"
-            self.appendEvent("安全", "设备密钥已从本机删除")
+    func deleteDeviceKey() {
+        guard !isOperating else {
+            operationMessage = "车辆控制进行中，不能删除设备密钥"
+            return
         }
+        DeviceKeyVault.delete()
+        refreshDeviceKeyState()
+        disconnect()
+        phase = .needsDeviceKey
+        operationMessage = "设备密钥已删除"
+        appendEvent("安全", "设备密钥已从本机删除")
     }
 
     private func beginScan() {
@@ -377,45 +406,6 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         appendEvent("错误", message)
         if let peripheral {
             central.cancelPeripheralConnection(peripheral)
-        }
-    }
-
-    @discardableResult
-    private func performAuthorized(
-        _ reason: String,
-        operation: () throws -> Void
-    ) async -> Bool {
-        guard !isAuthorizing, !isOperating else {
-            operationMessage = "已有操作正在进行"
-            appendEvent("安全", "阻止并发身份验证或控制")
-            return false
-        }
-        isAuthorizing = true
-        defer { isAuthorizing = false }
-        do {
-            let context = LAContext()
-            var evaluationError: NSError?
-            guard context.canEvaluatePolicy(
-                .deviceOwnerAuthentication,
-                error: &evaluationError
-            ) else {
-                throw evaluationError ?? NSError(
-                    domain: "IoTBluetooth",
-                    code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "设备所有者验证不可用"]
-                )
-            }
-            let accepted = try await context.evaluatePolicy(
-                .deviceOwnerAuthentication,
-                localizedReason: reason
-            )
-            guard accepted else { return false }
-            try operation()
-            return true
-        } catch {
-            operationMessage = error.localizedDescription
-            appendEvent("安全", "高风险操作未执行")
-            return false
         }
     }
 
