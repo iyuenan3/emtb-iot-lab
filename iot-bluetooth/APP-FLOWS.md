@@ -1,4 +1,6 @@
-# iPhone App 页面与交互流程
+# 历史 iPhone App 页面与交互流程
+
+> 本文记录 Build 20 及更早的多页远程方案，仅用于历史审计。Build 21 当前流程以 `documentation/flows.md` 为准，远程、地图、记录、维护和自动状态读取均未进入当前 App。
 
 ## 1. 产品定位
 

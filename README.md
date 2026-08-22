@@ -1,22 +1,22 @@
 # eMTB IoT Lab
 
-面向电助力山地车的非官方 IoT 研究与调试工具。项目将 iPhone 近场蓝牙、单车远程接入和 TCP 协议实验整合在一个仓库中，用于验证开关锁、声音找车、设备状态、定位和安全控制流程。
+面向电助力山地车的非官方 IoT 研究与调试工具。当前 iPhone App 已收缩为纯蓝牙车钥匙，远程服务和 TCP 实验代码作为独立研究模块保留在同一仓库。
 
 > 本项目只用于已获授权的自有硬件，不提供厂商密钥、固件、私有协议文档或生产服务凭据。
 
 ## 核心能力
 
-- **近场 BLE**：使用 SwiftUI 和 CoreBluetooth 扫描指定设备，完成认证、状态读取、开关锁、声音找车及维护操作。无网络时仍可使用。
-- **远程控制**：单车专用 Python 服务接收 IoT TCP 上报，并向 iPhone 提供状态、定位、找车及受保护的开关锁 API。
-- **安全认证**：设备密钥保存在 iOS Keychain，远程控制使用 Secure Enclave P-256 签名、一次性配对码和随机数防重放。
+- **近场 BLE App**：使用 SwiftUI 和 CoreBluetooth 手动连接指定设备，每次连接只执行一次受保护的开锁或关锁，完成必要回执后立即断开。
+- **远程服务研究**：单车专用 Python 服务保留 TCP 上报、状态、定位和受保护 API，但 Build 21 App 不连接该服务。
+- **安全认证**：设备密钥保存在 iOS Keychain，App 开关锁和密钥变更要求 Face ID 或设备密码。
 - **协议实验**：独立 TCP 工具支持报文采集、脱敏日志和白名单内的一次性实车测试，不自动重试控制指令。
-- **状态一致性**：已认证的 BLE 回读优先于远程缓存，App 会显示状态来源和更新时间。
+- **物理结果优先**：App 不自动读取或推断锁态，用户以仪表、动力和轮毂锁的实际状态作为最终结果。
 
 ## 项目结构
 
 | 目录 | 技术 | 用途 |
 | --- | --- | --- |
-| `iot-bluetooth/` | SwiftUI、CoreBluetooth、MapKit | iPhone 现场调试与远程控制 App |
+| `iot-bluetooth/` | SwiftUI、CoreBluetooth | 纯蓝牙 iPhone 车钥匙 App |
 | `iot-remote/` | Python 3、asyncio、SQLite | 单车 TCP 接入、签名 HTTP API、状态与定位存储 |
 | `iot-tcp-lab/` | Python 3、asyncio | 隔离的协议采集与一次性命令验证 |
 
@@ -28,7 +28,7 @@
 2. 填入自己的设备标识、BLE MAC、开发团队和 Bundle ID。该文件已被 Git 忽略。
 3. 使用 Xcode 打开 `iot-bluetooth/IoTBluetooth.xcodeproj`。
 4. 选择个人开发团队和真实 iPhone，然后运行安装。模拟器无法连接真实 BLE 设备。
-5. 在 App 的“更多 > 密钥与日志”中保存 8 字节设备密钥。
+5. 在 App 右上角“密钥”中保存 8 字节设备密钥。
 
 更完整的安装、功能和实车边界见 [蓝牙工具说明](iot-bluetooth/README.md)。
 
@@ -70,14 +70,14 @@ cd ../iot-tcp-lab
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 ```
 
-当前代码基线包含 77 项远程服务测试、16 项 TCP 工具测试和 4 项 iOS 源码守卫。Build 20 为 BLE 高风险写操作增加设备所有者验证，并阻止认证期间的并发重复请求；无签名与签名编译、真机安装、版本读回和系统启动均已通过。线上服务 revision `469f154b75bb243e61cd1dd3f291fde0256bb7bb` 已完成不可变发布、线上测试、公网读回、设备自动重连和真实密文恢复演练；用户级 systemd 已启用 linger，服务不会再随 SSH 会话结束。代码存在或 App 能启动不等于所有硬件能力均已实车验收，具体状态见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
+当前 Build 21 通过 7 项 iOS 源码守卫和通用 iOS 设备目标无签名编译。它已移除 App 中的远程控制、自动状态读取、自动重连、BLE 事件上传和维护能力。Build 21 尚未签名安装，也尚未进行真实车辆控制。线上服务 revision `469f154b75bb243e61cd1dd3f291fde0256bb7bb` 保持原状，本轮没有重新部署。具体边界见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
 
 ## 安全与隐私
 
 - 不得提交 IMEI、蓝牙 MAC、SIM 标识、精确位置、密钥、令牌、数据库或现场日志。
-- App 导出的 BLE 日志和设备快照会遮罩设备、位置及基础设施标识。
+- Build 21 的进程内诊断不保存密钥、完整设备标识、位置或服务器信息。
 - TCP 工具使用会话级指纹替代原始设备标识和客户端地址，并遮罩定位与敏感控制字段。
-- 开锁、关锁、服务器配置、APN 和 OTA 只能针对明确授权的设备执行，并需要现场确认和回滚方案。
+- 开锁和关锁只能针对明确授权的设备执行，并需要现场确认车辆物理状态。
 
 发现安全问题时，请按 [安全政策](SECURITY.md) 私密报告，不要在公开 Issue 中附带设备报文或利用细节。
 

@@ -2,45 +2,45 @@
 
 ## 产品边界
 
-`IoTBluetooth` 是单车、单用户的 iPhone 实车调试工具，支持附近 BLE 和经 `iot-remote` 的云端控制。两个通道各自维护连接与结果，不自动切换、不补发控制指令。
+Build 21 是单车、单用户、纯 BLE 的 iPhone 车钥匙。App 不访问网络，不保存服务器凭据，不展示远程状态，不自动读取车辆状态。
 
-## 当前结构
+## 当前构建目标
 
-| 层级 | 代码 | 职责 | 当前状态 |
-| --- | --- | --- | --- |
-| 界面 | `ContentView.swift` | 车辆、地图、记录、更多四页导航 | Build 15 已实现 |
-| BLE 状态 | `BLEDeviceManager.swift` | 扫描、认证、读写、重连和本地日志 | 已实现，部分指令待实车验证 |
-| BLE 协议 | `OmniProtocol.swift` | 帧编码、解码、校验和命令定义 | 已实现 |
-| 云端状态 | `RemoteControlManager.swift` | 配对、签名、车辆与命令 API | 已实现首期能力 |
-| BLE 事件队列 | `PendingBLEEventStore.swift` | 持久化、幂等补报和成功后删除 | Build 15 已安装，待真实 BLE 队列验收 |
-| 本机密钥 | `KeychainStore.swift` | BLE 密钥和远程凭据 | 已实现 |
-| 远程服务 | `../iot-remote/` | 单车 TCP、HTTPS API、命令状态机 | 2026 年 8 月 22 日已部署 revision `043004d` |
-| 位置存储 | `../iot-remote/iot_remote/database.py` | D0 原始报告、质量过滤、去重和历史查询 | 已部署，真实坐标与阈值待验收 |
+| 代码 | 职责 |
+| --- | --- |
+| `IoTBluetoothApp.swift` | 创建唯一的 BLE 状态管理器 |
+| `ContentView.swift` | 单页连接、开锁、关锁、结果与密钥界面 |
+| `BLEDeviceManager.swift` | 手动扫描、认证、单次控制、回执和主动断开 |
+| `OmniProtocol.swift` | 最小命令白名单、CRC8、帧编码和解码 |
+| `Models.swift` | 连接阶段、控制动作、结果和设备配置 |
+| `KeychainStore.swift` | 设备密钥的本机 Keychain 存储与旧值迁移 |
+
+`RemoteControlManager.swift`、`RemoteControlView.swift` 和 `PendingBLEEventStore.swift` 仍保留在 Git 历史和工作树中，但不在 Xcode Target 中，不会编译进 App。
 
 ## 数据流
 
 ```text
-iPhone App -> CoreBluetooth -> 车辆 IoT
-iPhone App -> HTTPS -> iot-remote -> TCP -> 车辆 IoT
+用户手动连接
+    ↓
+指定 BLE 广播与 NUS 服务
+    ↓
+设备密钥认证
+    ↓
+一次开锁或关锁
+    ↓
+设备协议结果
+    ↓
+必要回执
+    ↓
+App 主动断开
+    ↓
+用户检查车辆物理状态
 ```
 
-远程开关锁由 Secure Enclave 私钥签名，服务端完成防重放、幂等和设备回包校验。BLE 密钥不上传服务器。
+## 不变量
 
-## 设计约束
-
-- 首页只放日常状态和开关锁，维护能力统一进入“更多”。
-- 地图、基础位置、漂移过滤、D1 协调、布防、前台告警、骑行分段、保留清理和离线移动推断已实现。
-- 当前没有邮件、定时任务、公开 SEO、支付或 App 内智能体自动化。
-- 车辆状态必须标注来源。远程状态和 BLE 状态不能合并为未经证实的单一结果。
-- 主锁状态优先级为当前 BLE 回读、服务器最近确认、未知。普通回读使用签名观察接口；开关锁成功回包且回读一致时生成持久化操作事件。两者都不会转换成新的开关锁命令。
-
-## 相关文档
-
-- [界面设计](../APP-DESIGN.md)
-- [关键流程](flows.md)
-- [权限与安全](permissions.md)
-- [变量与配置](variables.md)
-- [测试策略](tests.md)
-- [实现状态](../IMPLEMENTATION-STATUS.md)
-- [远程 API](../API-DESIGN.md)
-- [服务端数据模型](../DATA-MODEL.md)
+- 认证成功后不发送状态读取或维护命令。
+- 一个连接最多发送一个控制请求。
+- 控制结果完成前不允许第二次操作。
+- 控制流程结束后主动断开，不自动重连。
+- 协议结果只表示设备已接收或拒绝，不能替代物理状态确认。

@@ -9,11 +9,11 @@
     <key>IoTDeviceBLEMAC</key>
     <string>$(DEVICE_BLE_MAC)</string>
 	<key>NSFaceIDUsageDescription</key>
-	<string>用于确认远程开锁和关锁操作</string>
+	<string>用于确认附近蓝牙开锁、关锁和设备密钥操作</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
-    <string>IoT Field Lab</string>
+    <string>eMTB 蓝牙钥匙</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -31,7 +31,7 @@
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>用于在现场连接并调试指定的自行车 IoT 蓝牙设备。</string>
+    <string>用于连接指定车辆并执行一次受保护的开锁或关锁操作。</string>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UIRequiredDeviceCapabilities</key>
