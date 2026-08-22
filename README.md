@@ -70,7 +70,7 @@ cd ../iot-tcp-lab
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 ```
 
-当前代码基线包含 77 项远程服务测试、16 项 TCP 工具测试和 4 项 iOS 源码守卫。Build 20 为 BLE 高风险写操作增加设备所有者验证，并阻止认证期间的并发重复请求；无签名与签名编译、真机安装、版本读回和系统启动均已通过。线上服务在本轮累计部署前仍为 revision `05043e0`。代码存在或 App 能启动不等于所有硬件能力均已实车验收，具体状态见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
+当前代码基线包含 77 项远程服务测试、16 项 TCP 工具测试和 4 项 iOS 源码守卫。Build 20 为 BLE 高风险写操作增加设备所有者验证，并阻止认证期间的并发重复请求；无签名与签名编译、真机安装、版本读回和系统启动均已通过。线上服务 revision `469f154b75bb243e61cd1dd3f291fde0256bb7bb` 已完成不可变发布、线上测试、公网读回、设备自动重连和真实密文恢复演练；用户级 systemd 已启用 linger，服务不会再随 SSH 会话结束。代码存在或 App 能启动不等于所有硬件能力均已实车验收，具体状态见 [实现状态](iot-bluetooth/IMPLEMENTATION-STATUS.md)。
 
 ## 安全与隐私
 
