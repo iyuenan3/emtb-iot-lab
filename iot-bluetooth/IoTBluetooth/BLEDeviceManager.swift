@@ -6,13 +6,16 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     @Published private(set) var phase: ConnectionPhase = .idle
     @Published private(set) var operationMessage = "手动连接后，每次只执行一个动作"
     @Published private(set) var lastOutcome: ControlOutcome = .none
+    @Published private(set) var lockState: VehicleLockState = .unknown
+    @Published private(set) var lockStateUpdatedAt: Date?
     @Published private(set) var rssi: Int?
     @Published private(set) var deviceKeyStored = false
     @Published private(set) var isOperating = false
+    @Published private(set) var isReadingLockState = false
     @Published private(set) var events: [FieldLogEvent] = []
 
     var isReady: Bool {
-        phase == .ready && isAuthenticated && writeCharacteristic != nil
+        phase == .ready && controlSession.isAuthenticated && writeCharacteristic != nil
     }
 
     var isOperationBusy: Bool {
@@ -20,7 +23,15 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     }
 
     var canStartAction: Bool {
-        isReady && !isOperationBusy && !actionAttemptedThisConnection && pendingWrite == nil
+        isReady && !isOperationBusy && !isReadingLockState && controlSession.canStartAction
+    }
+
+    var canUnlock: Bool {
+        canStartAction && lockState != .unlocked
+    }
+
+    var canLock: Bool {
+        canStartAction && lockState != .locked
     }
 
     var diagnosticReport: String {
@@ -31,6 +42,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
             "phase=\(phase.rawValue)",
             "ready=\(isReady)",
             "operating=\(isOperating)",
+            "lockState=\(lockState.rawValue)",
             "message=\(operationMessage)"
         ]
         lines.append(contentsOf: events.reversed().map { event in
@@ -45,12 +57,6 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         return formatter
     }()
 
-    private enum WritePurpose {
-        case authentication
-        case actionRequest
-        case actionReceipt
-    }
-
     private let serviceUUID = CBUUID(string: IoTDeviceProfile.serviceUUID)
     private let writeUUID = CBUUID(string: IoTDeviceProfile.writeUUID)
     private let notifyUUID = CBUUID(string: IoTDeviceProfile.notifyUUID)
@@ -60,15 +66,12 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
     private var connectionKey: UInt8 = 0
-    private var isAuthenticated = false
+    private var controlSession = BLEControlSession()
     private var scanRequested = false
-    private var actionAttemptedThisConnection = false
-    private var pendingAction: VehicleControlAction?
-    private var pendingResultAccepted: Bool?
-    private var pendingWrite: WritePurpose?
-    private var waitingToSendReceipt = false
+    private var awaitingPostActionReadback = false
     private var scanGeneration = 0
     private var operationGeneration = 0
+    private var lockReadGeneration = 0
 
     override init() {
         super.init()
@@ -98,8 +101,10 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
 
         scanRequested = true
-        actionAttemptedThisConnection = false
         resetTransport()
+        lockState = .unknown
+        lockStateUpdatedAt = nil
+        lastOutcome = .none
         if central.state == .poweredOn {
             beginScan()
         } else {
@@ -109,19 +114,14 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     }
 
     func disconnect() {
+        if isOperating, controlSession.pendingAction != nil {
+            markActionUnknown("用户在控制完成前手动断开蓝牙")
+            return
+        }
         scanRequested = false
         central.stopScan()
         operationGeneration += 1
-        if isOperating, let action = pendingAction {
-            lastOutcome = .unknown(action)
-            operationMessage = "连接已手动断开，\(action.rawValue)结果未知"
-        } else {
-            operationMessage = "蓝牙已手动断开"
-        }
-        isOperating = false
-        pendingAction = nil
-        pendingResultAccepted = nil
-        waitingToSendReceipt = false
+        operationMessage = "蓝牙已手动断开"
         requestDisconnect()
     }
 
@@ -194,12 +194,19 @@ final class BLEDeviceManager: NSObject, ObservableObject {
             appendEvent("安全", "阻止同一连接中的重复或反向控制")
             return
         }
+        guard !lockState.matches(action) else {
+            operationMessage = action == .unlock ? "车辆已经开锁" : "车辆已经关锁"
+            appendEvent("幂等", "当前锁态与请求一致，未发送控制指令")
+            return
+        }
+        guard controlSession.begin(action) else {
+            operationMessage = "当前连接不能再次执行控制，请断开后重新连接"
+            appendEvent("安全", "阻止同一连接中的重复或反向控制")
+            return
+        }
 
-        actionAttemptedThisConnection = true
         isOperating = true
-        pendingAction = action
-        pendingResultAccepted = nil
-        waitingToSendReceipt = false
+        awaitingPostActionReadback = false
         lastOutcome = .sending(action)
         operationMessage = "正在发送\(action.rawValue)指令"
         operationGeneration += 1
@@ -219,7 +226,11 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
 
         appendEvent("控制", "已创建单次\(action.rawValue)请求")
-        write(command: action.command, payload: payload, purpose: .actionRequest)
+        guard send(action.command, payload: payload) else {
+            markActionUnknown("蓝牙写入通道不可用")
+            return
+        }
+        appendEvent("控制", "已请求写入单次\(action.rawValue)指令，等待设备结果")
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             guard let self, self.isOperating, self.operationGeneration == generation else {
@@ -232,46 +243,74 @@ final class BLEDeviceManager: NSObject, ObservableObject {
     private func processFrame(_ frame: DecodedOmniFrame) {
         switch frame.command {
         case OmniCommand.authenticate.rawValue:
+            guard !controlSession.isAuthenticated else {
+                appendEvent("协议", "忽略重复认证结果")
+                return
+            }
             guard frame.content.count >= 2, frame.content[0] == 1 else {
                 failConnection("设备密钥认证失败")
                 return
             }
             connectionKey = frame.content[1]
-            isAuthenticated = true
+            controlSession.acceptAuthentication()
             phase = .ready
-            operationMessage = "蓝牙已认证，请选择一次操作"
-            appendEvent("BLE", "设备认证成功，未自动读取任何车辆状态")
+            operationMessage = "设备认证成功，正在读取锁态"
+            appendEvent("BLE", "设备认证成功")
+            refreshLockState(reason: "认证后首次读取")
 
-        case OmniCommand.unlock.rawValue, OmniCommand.lock.rawValue:
-            guard let action = pendingAction, frame.command == action.command.rawValue else {
-                appendEvent("协议", "忽略与当前操作无关的控制结果")
+        case OmniCommand.lockDetails.rawValue:
+            guard frame.content.count >= 3 else {
+                failLockRead("锁态回包长度不足")
                 return
             }
-            guard pendingResultAccepted == nil else {
-                appendEvent("协议", "忽略当前操作的重复结果")
+            lockReadGeneration += 1
+            isReadingLockState = false
+            lockState = (frame.content[2] & 0x01) == 0 ? .locked : .unlocked
+            lockStateUpdatedAt = Date()
+            appendEvent("状态", "锁态回读：\(lockState.rawValue)")
+            if awaitingPostActionReadback {
+                finishActionAfterReadback()
+            } else {
+                operationMessage = "\(lockState.rawValue)，可选择一次操作"
+            }
+
+        case OmniCommand.unlock.rawValue, OmniCommand.lock.rawValue:
+            guard let action = controlSession.pendingAction,
+                  frame.command == action.command.rawValue else {
+                appendEvent("协议", "忽略与当前操作无关的控制结果")
                 return
             }
             guard let result = frame.content.first else {
                 markActionUnknown("设备控制结果为空")
                 return
             }
-            pendingResultAccepted = result == 1
-            waitingToSendReceipt = true
-            operationMessage = result == 1
-                ? "设备已确认接收\(action.rawValue)指令，正在回执"
-                : "设备拒绝或未完成\(action.rawValue)，正在回执"
-            appendEvent("控制", "收到\(action.rawValue)协议结果，准备发送必要回执")
-            sendReceiptIfPossible()
+            guard let accepted = controlSession.recordResult(
+                command: frame.command,
+                value: result
+            ) else {
+                appendEvent("协议", "忽略当前操作的重复结果")
+                return
+            }
+            operationMessage = accepted
+                ? "设备已接收\(action.rawValue)指令，正在发送回执"
+                : "设备拒绝或未完成\(action.rawValue)，正在发送回执"
+            appendEvent("控制", "收到\(action.rawValue)协议结果，立即发送必要回执")
+            guard send(action.command, payload: [0x02]) else {
+                markActionUnknown("必要回执写入通道不可用")
+                return
+            }
+            appendEvent("控制", "必要回执已请求写入，等待后回读锁态")
+            schedulePostActionReadback()
 
         case OmniCommand.commandError.rawValue:
-            guard let action = pendingAction else {
+            guard let action = controlSession.pendingAction else {
                 appendEvent("协议", "设备返回协议错误")
                 return
             }
             lastOutcome = .rejected(action)
             operationMessage = "设备拒绝\(action.rawValue)指令"
             isOperating = false
-            pendingAction = nil
+            controlSession.finishAction()
             operationGeneration += 1
             appendEvent("控制", "设备返回协议错误，主动断开")
             requestDisconnect()
@@ -281,58 +320,96 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
     }
 
-    private func sendReceiptIfPossible() {
-        guard waitingToSendReceipt,
-              pendingWrite == nil,
-              let action = pendingAction else {
+    private func refreshLockState(reason: String) {
+        lockReadGeneration += 1
+        let generation = lockReadGeneration
+        isReadingLockState = true
+        appendEvent("状态", "请求锁态回读：\(reason)")
+        guard send(.lockDetails, payload: [0x01]) else {
+            failLockRead("锁态读取通道不可用")
             return
         }
-        waitingToSendReceipt = false
-        write(command: action.command, payload: [0x02], purpose: .actionReceipt)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self,
+                  self.isReadingLockState,
+                  self.lockReadGeneration == generation else {
+                return
+            }
+            self.failLockRead("5 秒内未收到锁态回包")
+        }
     }
 
-    private func finishActionAfterReceipt() {
-        guard let action = pendingAction, let accepted = pendingResultAccepted else {
-            markActionUnknown("控制回执状态不完整")
+    private func failLockRead(_ reason: String) {
+        lockReadGeneration += 1
+        isReadingLockState = false
+        if isOperating {
+            markActionUnknown(reason)
+        } else {
+            failConnection(reason)
+        }
+    }
+
+    private func schedulePostActionReadback() {
+        awaitingPostActionReadback = true
+        operationMessage = "必要回执已发送，等待锁态稳定"
+        let generation = operationGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self,
+                  self.isOperating,
+                  self.operationGeneration == generation else {
+                return
+            }
+            self.operationMessage = "正在回读控制后的锁态"
+            self.refreshLockState(reason: "控制后确认")
+        }
+    }
+
+    private func finishActionAfterReadback() {
+        guard let action = controlSession.pendingAction,
+              let accepted = controlSession.resultAccepted else {
+            markActionUnknown("控制结果与锁态回读状态不完整")
             return
         }
         operationGeneration += 1
         isOperating = false
-        pendingAction = nil
-        pendingResultAccepted = nil
-        lastOutcome = accepted ? .accepted(action) : .rejected(action)
-        operationMessage = accepted
-            ? "设备已接收\(action.rawValue)指令，蓝牙将断开，请检查车辆"
-            : "设备未完成\(action.rawValue)，蓝牙将断开"
-        appendEvent("控制", "必要回执已写入，立即主动断开蓝牙")
+        awaitingPostActionReadback = false
+        controlSession.finishAction()
+
+        if !accepted {
+            lastOutcome = .rejected(action)
+            operationMessage = "设备未完成\(action.rawValue)，锁态回读为\(lockState.rawValue)"
+            appendEvent("控制", "设备结果为拒绝，锁态回读为\(lockState.rawValue)")
+        } else if lockState.matches(action) {
+            lastOutcome = .accepted(action)
+            operationMessage = "设备回包与锁态回读一致，蓝牙将断开"
+            appendEvent("控制", "设备回包与锁态回读一致")
+        } else {
+            lastOutcome = .unknown(action)
+            operationMessage = "设备回包与锁态回读不一致，结果未知"
+            appendEvent("控制", "设备回包与锁态回读不一致")
+        }
         requestDisconnect()
     }
 
     private func markActionUnknown(_ reason: String) {
-        guard let action = pendingAction else { return }
+        guard let action = controlSession.pendingAction else { return }
         operationGeneration += 1
         lastOutcome = .unknown(action)
         operationMessage = "\(action.rawValue)结果未知，已停止等待并断开蓝牙"
         isOperating = false
-        pendingAction = nil
-        pendingResultAccepted = nil
-        waitingToSendReceipt = false
+        isReadingLockState = false
+        awaitingPostActionReadback = false
+        controlSession.finishAction()
         appendEvent("控制", reason)
         requestDisconnect()
     }
 
-    private func write(command: OmniCommand, payload: [UInt8], purpose: WritePurpose) {
-        guard pendingWrite == nil,
-              let peripheral,
+    @discardableResult
+    private func send(_ command: OmniCommand, payload: [UInt8]) -> Bool {
+        guard let peripheral,
               let writeCharacteristic else {
-            if isOperating {
-                markActionUnknown("蓝牙写入通道不可用")
-            } else {
-                failConnection("蓝牙写入通道不可用")
-            }
-            return
+            return false
         }
-        pendingWrite = purpose
         peripheral.writeValue(
             OmniProtocol.makeFrame(
                 command: command,
@@ -342,6 +419,7 @@ final class BLEDeviceManager: NSObject, ObservableObject {
             for: writeCharacteristic,
             type: .withResponse
         )
+        return true
     }
 
     private func authenticate() {
@@ -352,17 +430,16 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         }
         do {
             phase = .authenticating
-            guard pendingWrite == nil, let peripheral, let writeCharacteristic else {
+            guard let peripheral, let writeCharacteristic else {
                 failConnection("认证写入通道不可用")
                 return
             }
-            pendingWrite = .authentication
             peripheral.writeValue(
                 try OmniProtocol.authenticationFrame(deviceKey: key),
                 for: writeCharacteristic,
                 type: .withResponse
             )
-            appendEvent("BLE", "已发送认证请求")
+            appendEvent("BLE", "已请求写入认证帧")
         } catch {
             failConnection(error.localizedDescription)
         }
@@ -385,8 +462,10 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         writeCharacteristic = nil
         notifyCharacteristic = nil
         connectionKey = 0
-        isAuthenticated = false
-        pendingWrite = nil
+        controlSession.reset()
+        isReadingLockState = false
+        awaitingPostActionReadback = false
+        lockReadGeneration += 1
     }
 
     private func failConnection(_ message: String) {
@@ -395,12 +474,12 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         scanGeneration += 1
         operationGeneration += 1
         isOperating = false
-        if let action = pendingAction {
+        if let action = controlSession.pendingAction {
             lastOutcome = .unknown(action)
         }
-        pendingAction = nil
-        pendingResultAccepted = nil
-        waitingToSendReceipt = false
+        isReadingLockState = false
+        awaitingPostActionReadback = false
+        controlSession.finishAction()
         operationMessage = message
         phase = .failed
         appendEvent("错误", message)
@@ -490,14 +569,11 @@ extension BLEDeviceManager: CBCentralManagerDelegate {
         isReconnecting: Bool,
         error: Error?
     ) {
-        let interruptedAction = isOperating ? pendingAction : nil
+        let interruptedAction = isOperating ? controlSession.pendingAction : nil
         resetTransport()
         if let action = interruptedAction {
             operationGeneration += 1
             isOperating = false
-            pendingAction = nil
-            pendingResultAccepted = nil
-            waitingToSendReceipt = false
             lastOutcome = .unknown(action)
             operationMessage = "连接提前断开，\(action.rawValue)结果未知"
             appendEvent("控制", "控制完成前蓝牙断开，不会自动重连或重试")
@@ -579,8 +655,6 @@ extension BLEDeviceManager: CBPeripheralDelegate {
         didWriteValueFor characteristic: CBCharacteristic,
         error: Error?
     ) {
-        guard let purpose = pendingWrite else { return }
-        pendingWrite = nil
         if let error {
             if isOperating {
                 markActionUnknown("BLE 写入失败：\(error.localizedDescription)")
@@ -589,14 +663,7 @@ extension BLEDeviceManager: CBPeripheralDelegate {
             }
             return
         }
-        switch purpose {
-        case .authentication:
-            appendEvent("BLE", "认证请求已写入")
-        case .actionRequest:
-            appendEvent("控制", "单次控制请求已写入，等待设备结果")
-            sendReceiptIfPossible()
-        case .actionReceipt:
-            finishActionAfterReceipt()
-        }
+        controlSession.noteWriteCompleted()
+        appendEvent("BLE", "设备确认收到一次写入")
     }
 }

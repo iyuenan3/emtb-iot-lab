@@ -26,6 +26,67 @@ enum VehicleControlAction: String, Equatable {
     }
 }
 
+enum VehicleLockState: String, Equatable {
+    case unknown = "锁态未知"
+    case unlocked = "车辆已开锁"
+    case locked = "车辆已关锁"
+
+    func matches(_ action: VehicleControlAction) -> Bool {
+        switch action {
+        case .unlock: return self == .unlocked
+        case .lock: return self == .locked
+        }
+    }
+}
+
+struct BLEControlSession {
+    private(set) var isAuthenticated = false
+    private(set) var actionAttempted = false
+    private(set) var pendingAction: VehicleControlAction?
+    private(set) var resultAccepted: Bool?
+    private(set) var writeCompletionCount = 0
+
+    var canStartAction: Bool {
+        isAuthenticated && !actionAttempted && pendingAction == nil
+    }
+
+    mutating func acceptAuthentication() {
+        isAuthenticated = true
+    }
+
+    mutating func noteWriteCompleted() {
+        writeCompletionCount += 1
+    }
+
+    mutating func begin(_ action: VehicleControlAction) -> Bool {
+        guard canStartAction else { return false }
+        actionAttempted = true
+        pendingAction = action
+        resultAccepted = nil
+        return true
+    }
+
+    mutating func recordResult(command: UInt8, value: UInt8) -> Bool? {
+        guard let action = pendingAction,
+              action.command.rawValue == command,
+              resultAccepted == nil else {
+            return nil
+        }
+        let accepted = value == 1
+        resultAccepted = accepted
+        return accepted
+    }
+
+    mutating func finishAction() {
+        pendingAction = nil
+        resultAccepted = nil
+    }
+
+    mutating func reset() {
+        self = BLEControlSession()
+    }
+}
+
 enum ControlOutcome: Equatable {
     case none
     case sending(VehicleControlAction)

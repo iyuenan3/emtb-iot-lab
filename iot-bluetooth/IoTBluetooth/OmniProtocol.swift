@@ -5,6 +5,7 @@ enum OmniCommand: UInt8, CaseIterable {
     case unlock = 0x05
     case commandError = 0x10
     case lock = 0x15
+    case lockDetails = 0x31
 }
 
 struct DecodedOmniFrame {

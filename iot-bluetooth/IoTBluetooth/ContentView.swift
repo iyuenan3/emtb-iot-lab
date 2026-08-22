@@ -54,6 +54,17 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if device.isReady {
+                Label(device.lockState.rawValue, systemImage: lockStateSymbol)
+                    .font(.headline)
+                    .foregroundStyle(lockStateColor)
+                if let updatedAt = device.lockStateUpdatedAt {
+                    Text("蓝牙回读于 \(updatedAt.formatted(date: .omitted, time: .standard))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             if device.isReady || device.phase == .scanning || device.phase == .connecting
                 || device.phase == .discovering || device.phase == .authenticating {
                 Button("断开蓝牙", systemImage: "xmark.circle") {
@@ -96,7 +107,7 @@ struct ContentView: View {
                     title: "开锁",
                     icon: "lock.open.fill",
                     color: .orange,
-                    enabled: device.canStartAction
+                    enabled: device.canUnlock
                 ) {
                     device.unlock()
                 }
@@ -104,13 +115,13 @@ struct ContentView: View {
                     title: "关锁",
                     icon: "lock.fill",
                     color: .indigo,
-                    enabled: device.canStartAction
+                    enabled: device.canLock
                 ) {
                     device.lock()
                 }
             }
 
-            Text("每次蓝牙连接只允许一个动作。设备回包后 App 只发送必要回执，随后立即断开。")
+            Text("每次蓝牙连接只允许一个动作。设备回包后 App 发送必要回执，回读锁态，再主动断开。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -131,7 +142,7 @@ struct ContentView: View {
             )
         case .accepted(let action):
             resultCard(
-                title: "设备已接收\(action.rawValue)指令",
+                title: "设备回包与锁态回读一致",
                 message: physicalCheckMessage(action),
                 color: .green,
                 icon: "checkmark.circle.fill"
@@ -174,7 +185,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label("物理结果优先", systemImage: "shield.lefthalf.filled")
                 .font(.headline)
-            Text("App 不读取或推断当前锁态，也不会自动重连。关锁前确保车辆完全静止，操作后确认仪表、动力和轮毂锁。")
+            Text("App 只读取设备协议锁态，不访问网络，也不会自动重连或重试。关锁前确保车辆完全静止，操作后仍要确认仪表、动力和轮毂锁。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -279,6 +290,22 @@ struct ContentView: View {
         case .scanning, .connecting, .discovering, .authenticating: return .blue
         case .bluetoothOff, .failed: return .red
         default: return .secondary
+        }
+    }
+
+    private var lockStateSymbol: String {
+        switch device.lockState {
+        case .unknown: return "questionmark.circle"
+        case .unlocked: return "lock.open.fill"
+        case .locked: return "lock.fill"
+        }
+    }
+
+    private var lockStateColor: Color {
+        switch device.lockState {
+        case .unknown: return .secondary
+        case .unlocked: return .orange
+        case .locked: return .green
         }
     }
 
