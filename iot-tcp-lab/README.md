@@ -43,7 +43,7 @@ python3 server.py \
   --log-dir ./runtime/logs
 ```
 
-一次性关闭定位跟踪，并把 H0 与开锁状态 S6 间隔设为 3600 秒：
+一次性关闭定位跟踪和解锁状态 S6 定时上报，并把 H0 心跳间隔设为 3600 秒：
 
 ```bash
 python3 server.py \
@@ -52,8 +52,13 @@ python3 server.py \
   --target-imei '<目标 IMEI>' \
   --log-dir ./runtime/logs \
   --disable-location-tracking \
+  --disable-unlocked-telemetry \
   --reporting-interval-seconds 3600
 ```
+
+配置计划会先用全零 `S5` 读取当前值，再依次发送 `D1,0` 和
+`S5,0,1,3600,0`。加速度计灵敏度与原 S6 间隔保持不变。任一步回包不匹配时
+计划立即失败，不重试，也不继续发送后续写入。
 
 协议没有提供单独的关锁状态 S6 周期间隔字段。关锁时仍可能出现事件触发的 S6 上报。
 

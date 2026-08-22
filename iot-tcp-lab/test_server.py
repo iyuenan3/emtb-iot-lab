@@ -106,6 +106,7 @@ class CaptureServerTest(unittest.IsolatedAsyncioTestCase):
                 max_frame_bytes=4096,
                 reporting_interval_seconds=3600,
                 disable_location_tracking=True,
+                disable_unlocked_telemetry=True,
             )
             writer = self.FakeWriter()
             await capture.process_command_plan(
@@ -113,10 +114,21 @@ class CaptureServerTest(unittest.IsolatedAsyncioTestCase):
                 writer,
                 "127.0.0.1",
             )
+            self.assertEqual("awaiting_s5_query", capture._plan_state)
+            self.assertEqual(
+                b"\xff\xff*SCOS,ZZ,000000000000001,S5,0,0,0,0#\r\n",
+                writer.writes[0],
+            )
+
+            await capture.process_command_plan(
+                parse_frame(b"*SCOR,ZZ,000000000000001,S5,3,2,240,10#\r\n"),
+                writer,
+                "127.0.0.1",
+            )
             self.assertEqual("awaiting_d1", capture._plan_state)
             self.assertEqual(
                 b"\xff\xff*SCOS,ZZ,000000000000001,D1,0#\r\n",
-                writer.writes[0],
+                writer.writes[1],
             )
 
             await capture.process_command_plan(
@@ -126,12 +138,12 @@ class CaptureServerTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual("awaiting_s5", capture._plan_state)
             self.assertEqual(
-                b"\xff\xff*SCOS,ZZ,000000000000001,S5,0,2,3600,3600#\r\n",
-                writer.writes[1],
+                b"\xff\xff*SCOS,ZZ,000000000000001,S5,0,1,3600,0#\r\n",
+                writer.writes[2],
             )
 
             await capture.process_command_plan(
-                parse_frame(b"*SCOR,ZZ,000000000000001,S5,3,2,3600,3600#\r\n"),
+                parse_frame(b"*SCOR,ZZ,000000000000001,S5,3,1,3600,10#\r\n"),
                 writer,
                 "127.0.0.1",
             )
@@ -141,7 +153,50 @@ class CaptureServerTest(unittest.IsolatedAsyncioTestCase):
                 writer,
                 "127.0.0.1",
             )
-            self.assertEqual(2, len(writer.writes))
+            self.assertEqual(3, len(writer.writes))
+
+    async def test_reporting_plan_stops_on_mismatched_s5_without_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            capture = CaptureServer(
+                host="127.0.0.1",
+                port=0,
+                target_imei="000000000000001",
+                log_dir=Path(directory) / "logs",
+                idle_timeout=60,
+                max_connections=2,
+                max_frame_bytes=4096,
+                reporting_interval_seconds=3600,
+                disable_location_tracking=True,
+                disable_unlocked_telemetry=True,
+            )
+            writer = self.FakeWriter()
+            await capture.process_command_plan(
+                parse_frame(b"*SCOR,ZZ,000000000000001,Q0,0,100,31#\r\n"),
+                writer,
+                "127.0.0.1",
+            )
+            await capture.process_command_plan(
+                parse_frame(b"*SCOR,ZZ,000000000000001,S5,3,2,240,10#\r\n"),
+                writer,
+                "127.0.0.1",
+            )
+            await capture.process_command_plan(
+                parse_frame(b"*SCOR,ZZ,000000000000001,D1,0#\r\n"),
+                writer,
+                "127.0.0.1",
+            )
+            await capture.process_command_plan(
+                parse_frame(b"*SCOR,ZZ,000000000000001,S5,3,2,3600,10#\r\n"),
+                writer,
+                "127.0.0.1",
+            )
+            self.assertEqual("failed", capture._plan_state)
+            await capture.process_command_plan(
+                parse_frame(b"*SCOR,ZZ,000000000000001,Q0,0,100,31#\r\n"),
+                writer,
+                "127.0.0.1",
+            )
+            self.assertEqual(3, len(writer.writes))
 
     async def test_rotates_key_once_and_redacts_logs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

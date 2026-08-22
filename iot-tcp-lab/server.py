@@ -174,6 +174,7 @@ class CaptureServer:
         max_frame_bytes: int,
         reporting_interval_seconds: Optional[int] = None,
         disable_location_tracking: bool = False,
+        disable_unlocked_telemetry: bool = False,
         rotation_key: Optional[str] = None,
         one_shot_test: Optional[str] = None,
     ) -> None:
@@ -185,6 +186,8 @@ class CaptureServer:
         self.max_frame_bytes = max_frame_bytes
         self.reporting_interval_seconds = reporting_interval_seconds
         self.disable_location_tracking = disable_location_tracking
+        self.disable_unlocked_telemetry = disable_unlocked_telemetry
+        self._s5_baseline: Optional[List[str]] = None
         self._rotation_key = rotation_key
         self.one_shot_test = one_shot_test
         self._rotation_key_digest = (
@@ -202,7 +205,11 @@ class CaptureServer:
             self._plan_state = "pending_k0"
         elif one_shot_test is not None:
             self._plan_state = "pending_test"
-        elif reporting_interval_seconds is not None or disable_location_tracking:
+        elif (
+            reporting_interval_seconds is not None
+            or disable_location_tracking
+            or disable_unlocked_telemetry
+        ):
             self._plan_state = "pending"
         else:
             self._plan_state = "disabled"
@@ -237,16 +244,31 @@ class CaptureServer:
     async def _send_s5(
         self, writer: asyncio.StreamWriter, peer_ip: str, vendor: str
     ) -> None:
-        assert self.reporting_interval_seconds is not None
-        interval = str(self.reporting_interval_seconds)
+        assert self._s5_baseline is not None
+        interval = (
+            str(self.reporting_interval_seconds)
+            if self.reporting_interval_seconds is not None
+            else "0"
+        )
+        telemetry_mode = "1" if self.disable_unlocked_telemetry else "2"
+        telemetry_interval = "0" if self.disable_unlocked_telemetry else interval
         self._plan_state = "awaiting_s5"
         await self._send_downlink(
             writer,
             peer_ip,
             vendor,
             "S5",
-            ["0", "2", interval, interval],
+            ["0", telemetry_mode, interval, telemetry_interval],
         )
+
+    async def _continue_reporting_plan(
+        self, writer: asyncio.StreamWriter, peer_ip: str, vendor: str
+    ) -> None:
+        if self.disable_location_tracking:
+            self._plan_state = "awaiting_d1"
+            await self._send_downlink(writer, peer_ip, vendor, "D1", ["0"])
+        else:
+            await self._send_s5(writer, peer_ip, vendor)
 
     async def process_command_plan(
         self,
@@ -426,43 +448,102 @@ class CaptureServer:
             return
 
         if self._plan_state == "pending" and function == "Q0":
-            if self.disable_location_tracking:
-                self._plan_state = "awaiting_d1"
-                await self._send_downlink(writer, peer_ip, vendor, "D1", ["0"])
-            elif self.reporting_interval_seconds is not None:
-                await self._send_s5(writer, peer_ip, vendor)
+            if (
+                self.reporting_interval_seconds is not None
+                or self.disable_unlocked_telemetry
+            ):
+                self._plan_state = "awaiting_s5_query"
+                await self._send_downlink(
+                    writer, peer_ip, vendor, "S5", ["0", "0", "0", "0"]
+                )
+            elif self.disable_location_tracking:
+                await self._continue_reporting_plan(writer, peer_ip, vendor)
             return
 
-        if self._plan_state == "awaiting_d1" and function == "D1" and fields == ["0"]:
+        if self._plan_state == "awaiting_s5_query" and function == "S5":
+            verified = len(fields) >= 4 and all(item.isdigit() for item in fields[:4])
+            self.events.write(
+                "downlink_ack",
+                peer_ip=peer_ip,
+                imei=self.target_imei,
+                function="S5",
+                fields=fields,
+                verified=verified,
+                query=True,
+            )
+            if not verified:
+                self._plan_state = "failed"
+                return
+            self._s5_baseline = fields[:4]
+            await self._continue_reporting_plan(writer, peer_ip, vendor)
+            return
+
+        if self._plan_state == "awaiting_d1" and function == "D1":
+            verified = fields == ["0"]
             self.events.write(
                 "downlink_ack",
                 peer_ip=peer_ip,
                 imei=self.target_imei,
                 function="D1",
                 fields=fields,
+                verified=verified,
             )
-            if self.reporting_interval_seconds is not None:
+            if not verified:
+                self._plan_state = "failed"
+                return
+            if self._s5_baseline is not None:
                 await self._send_s5(writer, peer_ip, vendor)
             else:
                 self._plan_state = "complete"
+                self.events.write(
+                    "command_plan_complete",
+                    imei=self.target_imei,
+                    location_tracking_disabled=self.disable_location_tracking,
+                )
             return
 
-        if self._plan_state == "awaiting_s5" and function == "S5" and len(fields) >= 4:
-            interval = str(self.reporting_interval_seconds)
-            if fields[1:4] == ["2", interval, interval]:
-                self._plan_state = "complete"
-                self.events.write(
-                    "downlink_ack",
-                    peer_ip=peer_ip,
-                    imei=self.target_imei,
-                    function="S5",
-                    fields=fields,
-                )
+        if self._plan_state == "awaiting_s5" and function == "S5":
+            assert self._s5_baseline is not None
+            expected_heartbeat = (
+                str(self.reporting_interval_seconds)
+                if self.reporting_interval_seconds is not None
+                else self._s5_baseline[2]
+            )
+            expected_telemetry_mode = (
+                "1" if self.disable_unlocked_telemetry else "2"
+            )
+            expected_telemetry_interval = (
+                self._s5_baseline[3]
+                if self.disable_unlocked_telemetry
+                else expected_heartbeat
+            )
+            verified = (
+                len(fields) >= 4
+                and fields[:4]
+                == [
+                    self._s5_baseline[0],
+                    expected_telemetry_mode,
+                    expected_heartbeat,
+                    expected_telemetry_interval,
+                ]
+            )
+            self.events.write(
+                "downlink_ack",
+                peer_ip=peer_ip,
+                imei=self.target_imei,
+                function="S5",
+                fields=fields,
+                verified=verified,
+                query=False,
+            )
+            self._plan_state = "complete" if verified else "failed"
+            if verified:
                 self.events.write(
                     "command_plan_complete",
                     imei=self.target_imei,
                     reporting_interval_seconds=self.reporting_interval_seconds,
                     location_tracking_disabled=self.disable_location_tracking,
+                    unlocked_telemetry_disabled=self.disable_unlocked_telemetry,
                 )
 
     @staticmethod
@@ -602,6 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-frame-bytes", type=int, default=4096)
     parser.add_argument("--reporting-interval-seconds", type=int)
     parser.add_argument("--disable-location-tracking", action="store_true")
+    parser.add_argument("--disable-unlocked-telemetry", action="store_true")
     parser.add_argument("--rotate-key-file", type=Path)
     parser.add_argument(
         "--one-shot-test", choices=sorted(set(ONE_SHOT_TESTS) | set(CONTROL_TESTS))
@@ -626,7 +708,9 @@ def main() -> None:
         [
             rotation_key is not None,
             args.one_shot_test is not None,
-            args.reporting_interval_seconds is not None or args.disable_location_tracking,
+            args.reporting_interval_seconds is not None
+            or args.disable_location_tracking
+            or args.disable_unlocked_telemetry,
         ]
     )
     if selected_plans > 1:
@@ -641,6 +725,7 @@ def main() -> None:
         max_frame_bytes=args.max_frame_bytes,
         reporting_interval_seconds=args.reporting_interval_seconds,
         disable_location_tracking=args.disable_location_tracking,
+        disable_unlocked_telemetry=args.disable_unlocked_telemetry,
         rotation_key=rotation_key,
         one_shot_test=args.one_shot_test,
     )
