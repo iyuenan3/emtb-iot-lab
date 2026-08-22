@@ -1,6 +1,6 @@
 # 历史 iPhone App 页面与交互流程
 
-> 本文记录 Build 20 及更早的多页远程方案，仅用于历史审计。Build 23 当前流程以 `documentation/flows.md` 为准，远程、地图、记录、维护和 Face ID 均未进入当前 App；只恢复了 Build 2 的主锁状态读取。
+> 本文记录 Build 20 及更早的多页远程方案，仅用于历史审计。Build 24 当前流程以 `documentation/flows.md` 为准，远程、地图、记录、归档维护和 Face ID 均未进入当前 App；V1.2.5 文档正式列出的 BLE 功能已集中到纯蓝牙三页界面。
 
 ## 1. 产品定位
 

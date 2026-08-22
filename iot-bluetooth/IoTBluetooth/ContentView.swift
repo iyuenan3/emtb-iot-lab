@@ -1,6 +1,27 @@
 import SwiftUI
 
 struct ContentView: View {
+    var body: some View {
+        TabView {
+            KeyControlView()
+                .tabItem {
+                    Label("车钥匙", systemImage: "key.horizontal.fill")
+                }
+
+            VehicleToolsView()
+                .tabItem {
+                    Label("车辆", systemImage: "scooter")
+                }
+
+            BLEDataToolsView()
+                .tabItem {
+                    Label("工具", systemImage: "wrench.and.screwdriver.fill")
+                }
+        }
+    }
+}
+
+private struct KeyControlView: View {
     @EnvironmentObject private var device: BLEDeviceManager
     @State private var showKeySettings = false
     @State private var keyInput = ""
@@ -13,7 +34,6 @@ struct ContentView: View {
                     controlCard
                     outcomeCard
                     safetyCard
-                    diagnostics
                 }
                 .padding()
             }
@@ -58,27 +78,14 @@ struct ContentView: View {
                 Label(device.lockState.rawValue, systemImage: lockStateSymbol)
                     .font(.headline)
                     .foregroundStyle(lockStateColor)
-                if let updatedAt = device.lockStateUpdatedAt {
+                if let updatedAt = device.lockSnapshot.capturedAt {
                     Text("蓝牙回读于 \(updatedAt.formatted(date: .omitted, time: .standard))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            if device.isReady || device.phase == .scanning || device.phase == .connecting
-                || device.phase == .discovering || device.phase == .authenticating {
-                Button("断开蓝牙", systemImage: "xmark.circle") {
-                    device.disconnect()
-                }
-                .buttonStyle(.bordered)
-            } else {
-                Button("连接车辆", systemImage: "antenna.radiowaves.left.and.right") {
-                    device.scanAndConnect()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(!device.deviceKeyStored || device.isOperationBusy)
-            }
+            connectionButtons
 
             if !device.deviceKeyStored {
                 Label("首次使用请先保存设备密钥", systemImage: "exclamationmark.circle")
@@ -89,6 +96,33 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
         .padding(22)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 24))
+    }
+
+    @ViewBuilder private var connectionButtons: some View {
+        if device.isReady || device.phase == .scanning || device.phase == .connecting
+            || device.phase == .discovering || device.phase == .authenticating {
+            HStack {
+                if device.isReady {
+                    Button("刷新状态", systemImage: "arrow.clockwise") {
+                        device.refreshDeviceState()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!device.canRunProtocolCommand)
+                }
+                Button("断开蓝牙", systemImage: "xmark.circle") {
+                    device.disconnect()
+                }
+                .buttonStyle(.bordered)
+                .disabled(device.isOperating)
+            }
+        } else {
+            Button("连接车辆", systemImage: "antenna.radiowaves.left.and.right") {
+                device.scanAndConnect()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!device.deviceKeyStored || device.isOperating)
+        }
     }
 
     private var controlCard: some View {
@@ -121,7 +155,7 @@ struct ContentView: View {
                 }
             }
 
-            Text("每次蓝牙连接只允许一个动作。设备回包后 App 发送必要回执，回读锁态，再主动断开。")
+            Text("设备回包后 App 会发送必要回执，再回读锁态和车辆状态。结果一致时蓝牙保持连接，可以继续执行下一项操作。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -136,7 +170,7 @@ struct ContentView: View {
         case .sending(let action):
             resultCard(
                 title: "正在执行\(action.rawValue)",
-                message: "不要进行第二次操作，等待 App 主动断开蓝牙。",
+                message: "请等待设备回包、必要回执和状态回读完成。",
                 color: .blue,
                 icon: "hourglass"
             )
@@ -150,14 +184,14 @@ struct ContentView: View {
         case .rejected(let action):
             resultCard(
                 title: "设备未完成\(action.rawValue)",
-                message: "蓝牙已断开。请检查车辆，不要立即重复操作。",
+                message: "蓝牙仍保持连接。请先检查车辆实际状态，再决定是否操作。",
                 color: .orange,
                 icon: "exclamationmark.triangle.fill"
             )
         case .unknown(let action):
             resultCard(
                 title: "\(action.rawValue)结果未知",
-                message: "蓝牙已断开。请以仪表、动力和轮毂锁的实际状态为准，不要自动重试。",
+                message: "蓝牙已安全断开。请以仪表、动力和轮毂锁的实际状态为准，不要立即重试。",
                 color: .red,
                 icon: "questionmark.circle.fill"
             )
@@ -185,51 +219,11 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label("物理结果优先", systemImage: "shield.lefthalf.filled")
                 .font(.headline)
-            Text("App 只读取设备协议锁态，不访问网络，也不会自动重连或重试。关锁前确保车辆完全静止，操作后仍要确认仪表、动力和轮毂锁。")
+            Text("App 只使用文档内的本地蓝牙协议，不访问网络，也不会自动重连或重试。关锁前确保车辆完全静止，操作后仍要确认仪表、动力和轮毂锁。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(18)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
-    }
-
-    private var diagnostics: some View {
-        DisclosureGroup("诊断记录") {
-            ShareLink(item: device.diagnosticReport) {
-                Label("分享脱敏诊断", systemImage: "square.and.arrow.up")
-            }
-            .disabled(device.events.isEmpty)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 8)
-
-            if device.events.isEmpty {
-                Text("暂无记录")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 8)
-            } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(device.events.prefix(20)) { event in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(event.category).font(.caption.bold())
-                                Spacer()
-                                Text(event.timestamp, style: .time)
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                            Text(event.message)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Divider()
-                    }
-                }
-                .padding(.top, 10)
-            }
-        }
         .padding(18)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
     }
@@ -247,7 +241,7 @@ struct ContentView: View {
                             showKeySettings = false
                         }
                     }
-                    .disabled(keyInput.utf8.count != 8 || device.isOperationBusy)
+                    .disabled(keyInput.utf8.count != 8 || device.isOperating)
                 }
                 if device.deviceKeyStored {
                     Section {
@@ -256,7 +250,7 @@ struct ContentView: View {
                             keyInput = ""
                             showKeySettings = false
                         }
-                        .disabled(device.isOperationBusy)
+                        .disabled(device.isOperating)
                     }
                 }
                 Section {
@@ -312,14 +306,14 @@ struct ContentView: View {
     private func physicalCheckMessage(_ action: VehicleControlAction) -> String {
         switch action {
         case .unlock:
-            return "蓝牙已断开。请确认仪表稳定点亮、车辆通电、轮毂锁完全打开。"
+            return "蓝牙保持连接。请确认仪表稳定点亮、车辆通电、轮毂锁完全打开。"
         case .lock:
-            return "蓝牙已断开。请确认仪表熄灭、车辆断电、轮毂锁完全闭合。"
+            return "蓝牙保持连接。请确认仪表熄灭、车辆断电、轮毂锁完全闭合。"
         }
     }
 }
 
-private struct HoldControlButton: View {
+struct HoldControlButton: View {
     let title: String
     let icon: String
     let color: Color

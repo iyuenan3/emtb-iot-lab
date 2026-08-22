@@ -6,9 +6,10 @@
 
 | 配置 | 存储位置 | 说明 |
 | --- | --- | --- |
-| 设备密钥 | iOS Keychain | 8 个 ASCII 字节，用于 BLE 认证 |
+| 设备密钥 | iOS Keychain | 8 个 ASCII 字节，用于 BLE `0x01` 认证 |
+| 连接 Key | 仅内存 | 认证回包产生，只在当前 BLE 连接中使用，断开即清除 |
 | `DEVICE_IMEI` | `Secrets.xcconfig` | 用于隔离该车辆的 Keychain 账户 |
-| `DEVICE_BLE_MAC` | `Secrets.xcconfig` | 用于构造目标 BLE manufacturer data |
+| `DEVICE_BLE_MAC` | `Secrets.xcconfig` | 用于匹配目标 BLE manufacturer data 前缀 |
 | `DEVELOPMENT_TEAM` | `Secrets.xcconfig` | 真机签名团队 |
 | `PRODUCT_BUNDLE_IDENTIFIER` | `Secrets.xcconfig` | App Bundle ID |
 
@@ -22,6 +23,6 @@ NUS GATT UUID 固定定义在 `IoTBluetooth/Models.swift`。真实设备配置�
 
 不要 `source .env.local`。工具只应解析所需字段，禁止输出密钥值。iPhone App 不读取该文件。
 
-## 已取消的 App 配置
+## 当前 App 不使用的配置
 
-Build 23 不使用远程服务地址、配对令牌、Secure Enclave 控制私钥、Face ID、维护密钥、服务器配置、APN 或 OTA 文件。
+Build 24 不使用远程服务地址、配对令牌、Secure Enclave 控制私钥、Face ID、维护密钥、服务器配置、APN 或 OTA 文件。

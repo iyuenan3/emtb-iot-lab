@@ -6,6 +6,12 @@ enum OmniCommand: UInt8, CaseIterable {
     case commandError = 0x10
     case lock = 0x15
     case lockDetails = 0x31
+    case oldRideData = 0x51
+    case clearRideData = 0x52
+    case rideInfo = 0x60
+    case settings = 0x61
+    case settings2 = 0x62
+    case externalEquipment = 0x81
 }
 
 struct DecodedOmniFrame {
@@ -102,5 +108,70 @@ enum OmniProtocol {
 
     static func bytes<T: FixedWidthInteger>(of value: T) -> [UInt8] {
         withUnsafeBytes(of: value.bigEndian, Array.init)
+    }
+
+    static func uint16(_ bytes: ArraySlice<UInt8>) -> UInt16? {
+        guard bytes.count == 2 else { return nil }
+        return bytes.reduce(0) { ($0 << 8) | UInt16($1) }
+    }
+
+    static func uint32(_ bytes: ArraySlice<UInt8>) -> UInt32? {
+        guard bytes.count == 4 else { return nil }
+        return bytes.reduce(0) { ($0 << 8) | UInt32($1) }
+    }
+
+    static func lockDetails(from content: [UInt8]) -> (VehicleLockState, LockSnapshot)? {
+        guard content.count >= 7,
+              let voltage = uint16(content[0..<2]) else {
+            return nil
+        }
+        let flags = content[2]
+        let state: VehicleLockState = flags & 0x01 != 0 ? .unlocked : .locked
+        let snapshot = LockSnapshot(
+            voltageMillivolts: Int(voltage),
+            firmwareVersion: "\(content[4]).\(content[5]).\(content[6])",
+            hasOldRideData: flags & 0x40 != 0,
+            capturedAt: Date()
+        )
+        return (state, snapshot)
+    }
+
+    static func oldRideData(from content: [UInt8]) -> OldRideData? {
+        guard content.count >= 12,
+              let timestamp = uint32(content[0..<4]),
+              let duration = uint32(content[4..<8]),
+              let userID = uint32(content[8..<12]) else {
+            return nil
+        }
+        return OldRideData(
+            unlockTimestamp: timestamp,
+            durationSeconds: duration,
+            userID: userID
+        )
+    }
+
+    static func scooterInfo(from content: [UInt8]) -> ScooterSnapshot? {
+        guard content.count >= 8,
+              let speed = uint16(content[2..<4]),
+              let trip = uint16(content[4..<6]),
+              let remaining = uint16(content[6..<8]) else {
+            return nil
+        }
+        return ScooterSnapshot(
+            batteryPercent: Int(content[0]),
+            rideMode: ScooterRideMode(rawValue: Int(content[1])),
+            speedKPH: Double(speed) / 10.0,
+            tripDistanceMeters: Int(trip) * 10,
+            remainingDistanceMeters: Int(remaining) * 10,
+            capturedAt: Date()
+        )
+    }
+
+    static func externalState(from result: UInt8) -> ExternalDeviceState? {
+        switch result {
+        case 0x10: return .locked
+        case 0x11: return .unlocked
+        default: return nil
+        }
     }
 }

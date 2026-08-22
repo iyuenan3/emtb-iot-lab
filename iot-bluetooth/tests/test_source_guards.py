@@ -7,14 +7,18 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "IoTBluetooth"
 MANAGER = (SOURCE / "BLEDeviceManager.swift").read_text()
 CONTENT = (SOURCE / "ContentView.swift").read_text()
+VEHICLE = (SOURCE / "VehicleToolsView.swift").read_text()
+TOOLS = (SOURCE / "BLEDataToolsView.swift").read_text()
+ALL_UI = CONTENT + VEHICLE + TOOLS
 PROTOCOL = (SOURCE / "OmniProtocol.swift").read_text()
+MODELS = (SOURCE / "Models.swift").read_text()
 APP = (SOURCE / "IoTBluetoothApp.swift").read_text()
 INFO = (SOURCE / "Info.plist").read_text()
 PROJECT = (ROOT / "IoTBluetooth.xcodeproj" / "project.pbxproj").read_text()
 
 
 class SourceGuardTests(unittest.TestCase):
-    def test_app_target_is_ble_only(self):
+    def test_app_target_is_offline_ble_only(self):
         excluded = (
             "RemoteControlManager.swift",
             "RemoteControlView.swift",
@@ -23,48 +27,74 @@ class SourceGuardTests(unittest.TestCase):
         for name in excluded:
             self.assertNotIn(name, PROJECT)
         self.assertNotIn("RemoteControlManager", APP)
-        self.assertNotIn("URLSession", MANAGER + CONTENT + APP)
+        self.assertNotIn("URLSession", MANAGER + ALL_UI + APP)
 
-    def test_protocol_command_allowlist_is_exact(self):
+    def test_protocol_command_allowlist_matches_v125_document(self):
         cases = set(re.findall(r"case (\w+) = 0x[0-9A-Fa-f]{2}", PROTOCOL))
         self.assertEqual(
             cases,
-            {"authenticate", "unlock", "commandError", "lock", "lockDetails"},
+            {
+                "authenticate",
+                "unlock",
+                "commandError",
+                "lock",
+                "lockDetails",
+                "oldRideData",
+                "clearRideData",
+                "rideInfo",
+                "settings",
+                "settings2",
+                "externalEquipment",
+            },
         )
-        for forbidden in ("0x60", "0xFA", "0xFB", "0xFC", "0xFF"):
-            self.assertNotIn(forbidden, PROTOCOL + MANAGER)
+        for undocumented in ("0x85", "0x91", "0xFA", "0xFB", "0xFC", "0xFF"):
+            self.assertNotIn(undocumented, PROTOCOL + MANAGER)
 
-    def test_manager_only_restores_lock_read_and_never_reconnects(self):
-        forbidden = (
-            "refreshAll",
-            "shouldReconnect",
-            "rideInfo",
-            "transferStart",
-            "syncBLE",
-            "retrievePeripherals",
+    def test_all_documented_feature_families_are_routed(self):
+        expected_routes = (
+            "case OmniCommand.authenticate.rawValue",
+            "case OmniCommand.commandError.rawValue",
+            "case OmniCommand.unlock.rawValue, OmniCommand.lock.rawValue",
+            "case OmniCommand.lockDetails.rawValue",
+            "case OmniCommand.oldRideData.rawValue",
+            "case OmniCommand.clearRideData.rawValue",
+            "case OmniCommand.rideInfo.rawValue",
+            "case OmniCommand.settings.rawValue",
+            "case OmniCommand.settings2.rawValue",
+            "case OmniCommand.externalEquipment.rawValue",
         )
-        for token in forbidden:
-            self.assertNotIn(token, MANAGER)
-        self.assertIn("refreshLockState", MANAGER)
-        self.assertIn("case OmniCommand.lockDetails.rawValue", MANAGER)
-        self.assertIn("认证后首次读取", MANAGER)
-        self.assertIn("控制后确认", MANAGER)
-        self.assertIn("不会自动重连或重试", MANAGER)
+        for route in expected_routes:
+            self.assertIn(route, MANAGER)
+        for entry_point in (
+            "func refreshDeviceState()",
+            "func requestOldRideData()",
+            "func clearOldRideData()",
+            "func applyBasicSettings(",
+            "func applyAdvancedSettings(",
+            "func operateExternalDevice(",
+        ):
+            self.assertIn(entry_point, MANAGER)
 
-    def test_one_action_per_connection_then_disconnects_after_readback(self):
+    def test_connection_is_reused_but_never_automatically_reconnected(self):
         self.assertIn("BLEControlSession", MANAGER)
         self.assertIn("guard controlSession.begin(action) else", MANAGER)
         self.assertIn("payload: [0x02]", MANAGER)
-        self.assertIn("schedulePostActionReadback()", MANAGER)
-        self.assertIn("finishActionAfterReadback()", MANAGER)
-        self.assertRegex(
-            MANAGER,
-            r"(?s)private func finishActionAfterReadback\(\).*?requestDisconnect\(\)",
-        )
+        self.assertIn("finishControlAfterReadback()", MANAGER)
+        self.assertIn("controlSession.finishAction()", MANAGER)
+        self.assertIn("设备回包与状态回读一致，蓝牙保持连接", MANAGER)
+        self.assertIn("可以继续执行下一项操作", CONTENT)
+        for forbidden in ("shouldReconnect", "retrievePeripherals", "connectAfter"):
+            self.assertNotIn(forbidden, MANAGER)
+        self.assertIn("不会自动重连或重试", MANAGER)
+
+    def test_unknown_mutation_disconnects_and_is_not_retried(self):
+        self.assertIn("if isMutation {", MANAGER)
+        self.assertIn("requestDisconnect()", MANAGER)
+        self.assertIn("结果未知，蓝牙已停止并断开", MANAGER)
+        self.assertNotIn("retry", MANAGER.lower())
 
     def test_control_does_not_wait_for_write_callback(self):
-        self.assertNotIn("pendingWrite", MANAGER)
-        self.assertNotIn("WritePurpose", MANAGER)
+        self.assertIn("pendingWriteTickets", MANAGER)
         self.assertIn("controlSession.noteWriteCompleted()", MANAGER)
         callback = MANAGER.split("didWriteValueFor characteristic", 1)[1]
         self.assertNotIn("send(", callback)
@@ -73,32 +103,50 @@ class SourceGuardTests(unittest.TestCase):
     def test_controls_do_not_require_biometric_authentication(self):
         self.assertRegex(MANAGER, r"func unlock\(\)")
         self.assertRegex(MANAGER, r"func lock\(\)")
-        self.assertRegex(MANAGER, r"private func startAction\(")
+        self.assertRegex(MANAGER, r"private func startControl\(")
         for forbidden in (
             "LocalAuthentication",
             "deviceOwnerAuthentication",
             "WithOwnerAuthentication",
             "NSFaceIDUsageDescription",
         ):
-            self.assertNotIn(forbidden, MANAGER + CONTENT + APP + INFO)
+            self.assertNotIn(forbidden, MANAGER + ALL_UI + APP + INFO)
         self.assertIn("device.unlock()", CONTENT)
         self.assertIn("device.lock()", CONTENT)
-        self.assertNotRegex(CONTENT, r"device\.startAction\(")
+
+    def test_mutating_tools_require_confirmation(self):
+        self.assertIn("确认修改基础设置", VEHICLE)
+        self.assertIn("确认修改高级设置", VEHICLE)
+        self.assertIn("清除旧骑行数据？", TOOLS)
+        self.assertIn("确认外部锁操作", TOOLS)
+        self.assertIn("role: .destructive", VEHICLE + TOOLS)
 
     def test_ui_never_claims_physical_success(self):
-        self.assertNotIn("开锁成功", CONTENT + MANAGER)
-        self.assertNotIn("关锁成功", CONTENT + MANAGER)
+        self.assertNotIn("开锁成功", ALL_UI + MANAGER)
+        self.assertNotIn("关锁成功", ALL_UI + MANAGER)
         self.assertIn("设备回包与锁态回读一致", CONTENT)
         self.assertIn("物理结果优先", CONTENT)
-        self.assertIn("每次蓝牙连接只允许一个动作", CONTENT)
+        self.assertIn("检查真实机械状态", TOOLS)
 
-    def test_diagnostics_are_shareable(self):
+    def test_diagnostics_are_shareable_and_exclude_old_user_id(self):
         self.assertIn("var diagnosticReport: String", MANAGER)
-        self.assertIn("ShareLink(item: device.diagnosticReport)", CONTENT)
-        self.assertIn("分享脱敏诊断", CONTENT)
+        self.assertIn("ShareLink(item: device.diagnosticReport)", TOOLS)
+        self.assertIn("分享脱敏诊断", TOOLS)
+        diagnostic = MANAGER.split("var diagnosticReport: String", 1)[1].split(
+            "var oldRideDataReport", 1
+        )[0]
+        self.assertNotIn("userID", diagnostic)
 
-    def test_build_number_is_23(self):
-        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 23;"), 2)
+    def test_new_views_are_in_target_and_build_number_is_24(self):
+        for name in ("VehicleToolsView.swift", "BLEDataToolsView.swift"):
+            self.assertEqual(PROJECT.count(f"path = {name};"), 1)
+            self.assertEqual(PROJECT.count(f"/* {name} in Sources */"), 2)
+        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 24;"), 2)
+
+    def test_external_devices_are_documented_three_only(self):
+        cases = set(re.findall(r"case (\w+) = \"[^\"]+锁\"", MODELS))
+        self.assertTrue({"battery", "wheel", "cable"}.issubset(cases))
+        self.assertNotIn("hub", MODELS.lower())
 
 
 if __name__ == "__main__":

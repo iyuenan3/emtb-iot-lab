@@ -41,13 +41,12 @@ enum VehicleLockState: String, Equatable {
 
 struct BLEControlSession {
     private(set) var isAuthenticated = false
-    private(set) var actionAttempted = false
     private(set) var pendingAction: VehicleControlAction?
     private(set) var resultAccepted: Bool?
     private(set) var writeCompletionCount = 0
 
     var canStartAction: Bool {
-        isAuthenticated && !actionAttempted && pendingAction == nil
+        isAuthenticated && pendingAction == nil
     }
 
     mutating func acceptAuthentication() {
@@ -60,7 +59,6 @@ struct BLEControlSession {
 
     mutating func begin(_ action: VehicleControlAction) -> Bool {
         guard canStartAction else { return false }
-        actionAttempted = true
         pendingAction = action
         resultAccepted = nil
         return true
@@ -93,6 +91,210 @@ enum ControlOutcome: Equatable {
     case accepted(VehicleControlAction)
     case rejected(VehicleControlAction)
     case unknown(VehicleControlAction)
+}
+
+struct LockSnapshot: Equatable {
+    var voltageMillivolts: Int?
+    var firmwareVersion: String?
+    var hasOldRideData = false
+    var capturedAt: Date?
+}
+
+enum ScooterRideMode: Int, CaseIterable, Identifiable {
+    case low = 1
+    case medium = 2
+    case high = 3
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .low: return "低速"
+        case .medium: return "中速"
+        case .high: return "高速"
+        }
+    }
+}
+
+struct ScooterSnapshot: Equatable {
+    var batteryPercent: Int?
+    var rideMode: ScooterRideMode?
+    var speedKPH: Double?
+    var tripDistanceMeters: Int?
+    var remainingDistanceMeters: Int?
+    var capturedAt: Date?
+}
+
+struct OldRideData: Equatable {
+    let unlockTimestamp: UInt32
+    let durationSeconds: UInt32
+    let userID: UInt32
+
+    var unlockDate: Date {
+        Date(timeIntervalSince1970: TimeInterval(unlockTimestamp))
+    }
+}
+
+enum SettingChoice: UInt8, CaseIterable, Identifiable {
+    case unchanged = 0
+    case disabled = 1
+    case enabled = 2
+
+    var id: UInt8 { rawValue }
+
+    var title: String {
+        switch self {
+        case .unchanged: return "不修改"
+        case .disabled: return "关闭"
+        case .enabled: return "开启"
+        }
+    }
+}
+
+enum RideModeChoice: UInt8, CaseIterable, Identifiable {
+    case unchanged = 0
+    case low = 1
+    case medium = 2
+    case high = 3
+
+    var id: UInt8 { rawValue }
+
+    var title: String {
+        switch self {
+        case .unchanged: return "不修改"
+        case .low: return "低速"
+        case .medium: return "中速"
+        case .high: return "高速"
+        }
+    }
+}
+
+enum StartModeChoice: UInt8, CaseIterable, Identifiable {
+    case unchanged = 0
+    case nonZero = 1
+    case zero = 2
+
+    var id: UInt8 { rawValue }
+
+    var title: String {
+        switch self {
+        case .unchanged: return "不修改"
+        case .nonZero: return "非零启动"
+        case .zero: return "零启动"
+        }
+    }
+}
+
+struct ScooterBasicSettings: Equatable {
+    let light: SettingChoice
+    let rideMode: RideModeChoice
+    let accelerator: SettingChoice
+    let tailLight: SettingChoice
+
+    var payload: [UInt8] {
+        [light.rawValue, rideMode.rawValue, accelerator.rawValue, tailLight.rawValue]
+    }
+
+    var isNoOp: Bool {
+        payload.allSatisfy { $0 == 0 }
+    }
+}
+
+enum ScooterSettingsError: LocalizedError {
+    case noChanges
+    case invalidSpeedLimit
+
+    var errorDescription: String? {
+        switch self {
+        case .noChanges: return "至少选择一项需要修改的设置"
+        case .invalidSpeedLimit: return "限速值必须为 0 或 6 到 25 km/h"
+        }
+    }
+}
+
+struct ScooterAdvancedSettings: Equatable {
+    let persist: Bool
+    let cruise: SettingChoice
+    let startMode: StartModeChoice
+    let lowSpeedLimit: Int
+    let mediumSpeedLimit: Int
+    let highSpeedLimit: Int
+
+    var payload: [UInt8] {
+        [
+            persist ? 1 : 0,
+            cruise.rawValue,
+            startMode.rawValue,
+            UInt8(lowSpeedLimit),
+            UInt8(mediumSpeedLimit),
+            UInt8(highSpeedLimit)
+        ]
+    }
+
+    func validate() throws {
+        let limits = [lowSpeedLimit, mediumSpeedLimit, highSpeedLimit]
+        guard limits.allSatisfy({ $0 == 0 || (6...25).contains($0) }) else {
+            throw ScooterSettingsError.invalidSpeedLimit
+        }
+        guard cruise != .unchanged || startMode != .unchanged || limits.contains(where: { $0 != 0 }) else {
+            throw ScooterSettingsError.noChanges
+        }
+    }
+}
+
+enum ExternalDeviceKind: String, CaseIterable, Identifiable, Hashable {
+    case battery = "电池锁"
+    case wheel = "车轮锁"
+    case cable = "钢缆锁"
+
+    var id: String { rawValue }
+
+    fileprivate var baseCode: UInt8 {
+        switch self {
+        case .battery: return 0x01
+        case .wheel: return 0x02
+        case .cable: return 0x03
+        }
+    }
+}
+
+enum ExternalDeviceState: String, Equatable {
+    case unknown = "状态未知"
+    case locked = "已上锁"
+    case unlocked = "已解锁"
+}
+
+enum ExternalDeviceOperation: Equatable {
+    case unlock(ExternalDeviceKind)
+    case lock(ExternalDeviceKind)
+    case query(ExternalDeviceKind)
+
+    var kind: ExternalDeviceKind {
+        switch self {
+        case .unlock(let kind), .lock(let kind), .query(let kind): return kind
+        }
+    }
+
+    var code: UInt8 {
+        switch self {
+        case .unlock(let kind): return kind.baseCode
+        case .lock(let kind): return kind.baseCode + 0x10
+        case .query(let kind): return kind.baseCode + 0x20
+        }
+    }
+
+    var isMutation: Bool {
+        if case .query = self { return false }
+        return true
+    }
+
+    var title: String {
+        switch self {
+        case .unlock(let kind): return "解锁\(kind.rawValue)"
+        case .lock(let kind): return "上锁\(kind.rawValue)"
+        case .query(let kind): return "查询\(kind.rawValue)"
+        }
+    }
 }
 
 struct IoTDeviceProfile {

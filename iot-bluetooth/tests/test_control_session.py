@@ -11,7 +11,7 @@ HARNESS = ROOT / "tests" / "BLEControlSessionHarness.swift"
 
 
 class ControlSessionTests(unittest.TestCase):
-    def test_callback_order_and_single_action_contract(self):
+    def test_callback_order_persistent_session_and_protocol_models(self):
         with tempfile.TemporaryDirectory(prefix="emtb-ble-session-") as temporary:
             temporary_path = Path(temporary)
             executable = temporary_path / "ble-control-session-tests"
