@@ -16,6 +16,7 @@
 		A10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* Assets.xcassets */; };
 		A10000000000000000000008 /* VehicleToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* VehicleToolsView.swift */; };
 		A10000000000000000000009 /* BLEDataToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000E /* BLEDataToolsView.swift */; };
+		A1000000000000000000000A /* AppDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000F /* AppDesignSystem.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +33,7 @@
 		B1000000000000000000000C /* Secrets.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig.example; sourceTree = "<group>"; };
 		B1000000000000000000000D /* VehicleToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VehicleToolsView.swift; sourceTree = "<group>"; };
 		B1000000000000000000000E /* BLEDataToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEDataToolsView.swift; sourceTree = "<group>"; };
+		B1000000000000000000000F /* AppDesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDesignSystem.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -64,6 +66,7 @@
 				B10000000000000000000004 /* KeychainStore.swift */,
 				B10000000000000000000005 /* OmniProtocol.swift */,
 				B10000000000000000000006 /* BLEDeviceManager.swift */,
+				B1000000000000000000000F /* AppDesignSystem.swift */,
 				B1000000000000000000000D /* VehicleToolsView.swift */,
 				B1000000000000000000000E /* BLEDataToolsView.swift */,
 				B10000000000000000000007 /* Info.plist */,
@@ -155,6 +158,7 @@
 				A10000000000000000000004 /* KeychainStore.swift in Sources */,
 				A10000000000000000000005 /* OmniProtocol.swift in Sources */,
 				A10000000000000000000006 /* BLEDeviceManager.swift in Sources */,
+				A1000000000000000000000A /* AppDesignSystem.swift in Sources */,
 				A10000000000000000000008 /* VehicleToolsView.swift in Sources */,
 				A10000000000000000000009 /* BLEDataToolsView.swift in Sources */,
 			);
@@ -205,7 +209,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 25;
+				CURRENT_PROJECT_VERSION = 26;
 				DEVELOPMENT_ASSET_PATHS = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = IoTBluetooth/Info.plist;
@@ -226,7 +230,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 25;
+				CURRENT_PROJECT_VERSION = 26;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = IoTBluetooth/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;

@@ -9,7 +9,8 @@ MANAGER = (SOURCE / "BLEDeviceManager.swift").read_text()
 CONTENT = (SOURCE / "ContentView.swift").read_text()
 VEHICLE = (SOURCE / "VehicleToolsView.swift").read_text()
 TOOLS = (SOURCE / "BLEDataToolsView.swift").read_text()
-ALL_UI = CONTENT + VEHICLE + TOOLS
+DESIGN = (SOURCE / "AppDesignSystem.swift").read_text()
+ALL_UI = CONTENT + VEHICLE + TOOLS + DESIGN
 PROTOCOL = (SOURCE / "OmniProtocol.swift").read_text()
 MODELS = (SOURCE / "Models.swift").read_text()
 APP = (SOURCE / "IoTBluetoothApp.swift").read_text()
@@ -141,11 +142,31 @@ class SourceGuardTests(unittest.TestCase):
         )[0]
         self.assertNotIn("userID", diagnostic)
 
-    def test_current_views_are_in_target_and_build_number_is_25(self):
-        for name in ("VehicleToolsView.swift", "BLEDataToolsView.swift"):
+    def test_current_views_are_in_target_and_build_number_is_26(self):
+        for name in (
+            "AppDesignSystem.swift",
+            "VehicleToolsView.swift",
+            "BLEDataToolsView.swift",
+        ):
             self.assertEqual(PROJECT.count(f"path = {name};"), 1)
             self.assertEqual(PROJECT.count(f"/* {name} in Sources */"), 2)
-        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 25;"), 2)
+        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 26;"), 2)
+
+    def test_build_26_ui_system_is_consistent_and_accessible(self):
+        self.assertIn("enum AppTheme", DESIGN)
+        self.assertIn("func appCard(", DESIGN)
+        self.assertIn("struct ConnectionStatusBanner", DESIGN)
+        self.assertIn("ConnectionStatusBanner()", VEHICLE)
+        self.assertIn("ConnectionStatusBanner()", TOOLS)
+        self.assertIn("LazyVGrid", VEHICLE)
+        self.assertIn("AppMetricTile", VEHICLE)
+        self.assertIn("ContentUnavailableView", TOOLS)
+        self.assertIn("accessibilityReduceMotion", CONTENT)
+        self.assertIn("accessibilityValue(enabled ? \"可用\" : \"当前不可用\")", CONTENT)
+        self.assertIn("accessibilityRespondsToUserInteraction(enabled)", CONTENT)
+        self.assertIn("minimumDuration: 1.2", CONTENT)
+        self.assertIn("仪表必须熄灭", CONTENT)
+        self.assertIn("轮毂锁必须锁住", CONTENT)
 
     def test_external_devices_remain_protocol_reference_only(self):
         cases = set(re.findall(r"case (\w+) = \"[^\"]+锁\"", MODELS))

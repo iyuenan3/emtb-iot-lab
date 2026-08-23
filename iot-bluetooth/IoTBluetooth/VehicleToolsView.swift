@@ -3,95 +3,148 @@ import SwiftUI
 struct VehicleToolsView: View {
     @EnvironmentObject private var device: BLEDeviceManager
 
+    private let columns = [
+        GridItem(.flexible(), spacing: 12),
+        GridItem(.flexible(), spacing: 12)
+    ]
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 18) {
-                    connectionNotice
+                LazyVStack(spacing: 16) {
+                    ConnectionStatusBanner()
                     statusCard
                     acceptanceBoundaryCard
                 }
-                .padding()
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 28)
             }
-            .background(Color(.systemGroupedBackground))
+            .background { AppTheme.pageBackground }
             .navigationTitle("车辆状态")
         }
     }
 
-    private var connectionNotice: some View {
-        HStack(spacing: 10) {
-            Image(systemName: device.isReady ? "checkmark.circle.fill" : "antenna.radiowaves.left.and.right.slash")
-                .foregroundStyle(device.isReady ? .green : .secondary)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(device.isReady ? "蓝牙已连接" : "请先在车钥匙页连接车辆")
-                    .font(.headline)
-                Text(device.operationMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-        }
-        .padding(16)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
-    }
-
     private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Label("实时车辆信息", systemImage: "gauge.with.dots.needle.67percent")
-                    .font(.headline)
-                Spacer()
-                Button("刷新", systemImage: "arrow.clockwise") {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                AppSectionHeader("车辆信息", subtitle: "数据来自当前蓝牙连接", icon: "gauge.with.dots.needle.67percent")
+
+                Button {
                     device.refreshDeviceState()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.headline)
+                        .frame(width: 38, height: 38)
                 }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+                .tint(AppTheme.brand)
                 .disabled(!device.canRunProtocolCommand)
+                .accessibilityLabel("刷新车辆状态")
             }
 
-            HStack(spacing: 12) {
-                metric(title: "电量", value: percent(device.scooterSnapshot.batteryPercent))
-                metric(title: "模式", value: device.scooterSnapshot.rideMode?.title ?? "未知")
-                metric(title: "速度", value: speed(device.scooterSnapshot.speedKPH))
+            HStack {
+                AppStatusBadge(
+                    text: device.lockState.rawValue,
+                    icon: lockStateIcon,
+                    color: lockStateColor
+                )
+                Spacer()
+                if let capturedAt = latestCapturedAt {
+                    Text(capturedAt, style: .time)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
-            HStack(spacing: 12) {
-                metric(title: "本次里程", value: distance(device.scooterSnapshot.tripDistanceMeters))
-                metric(title: "剩余里程", value: distance(device.scooterSnapshot.remainingDistanceMeters))
-                metric(title: "锁电压", value: voltage(device.lockSnapshot.voltageMillivolts))
+
+            LazyVGrid(columns: columns, spacing: 12) {
+                AppMetricTile(
+                    title: "电量",
+                    value: percent(device.scooterSnapshot.batteryPercent),
+                    icon: "battery.75percent",
+                    color: AppTheme.success
+                )
+                AppMetricTile(
+                    title: "当前速度",
+                    value: speed(device.scooterSnapshot.speedKPH),
+                    icon: "speedometer",
+                    color: AppTheme.brand
+                )
+                AppMetricTile(
+                    title: "骑行模式",
+                    value: device.scooterSnapshot.rideMode?.title ?? "未知",
+                    icon: "slider.horizontal.3",
+                    color: AppTheme.accent
+                )
+                AppMetricTile(
+                    title: "本次里程",
+                    value: distance(device.scooterSnapshot.tripDistanceMeters),
+                    icon: "point.bottomleft.forward.to.point.topright.scurvepath",
+                    color: .purple
+                )
+                AppMetricTile(
+                    title: "剩余里程",
+                    value: distance(device.scooterSnapshot.remainingDistanceMeters),
+                    icon: "map.fill",
+                    color: .teal
+                )
+                AppMetricTile(
+                    title: "锁电压",
+                    value: voltage(device.lockSnapshot.voltageMillivolts),
+                    icon: "bolt.fill",
+                    color: AppTheme.warning
+                )
             }
 
             if let firmware = device.lockSnapshot.firmwareVersion {
-                Text("锁固件版本 \(firmware)")
-                    .font(.caption)
+                Label("锁固件 \(firmware)", systemImage: "cpu")
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(18)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+        .appCard()
     }
 
     private var acceptanceBoundaryCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("实车验收边界", systemImage: "checkmark.shield.fill")
-                .font(.headline)
-            Text("当前只开放已验证稳定的状态读取。协议中的 0x61、0x62 设置在本车上没有得到可靠生效证据，已经停用，避免出现仪表供电与逻辑锁态不一致。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 16) {
+            AppSectionHeader("只保留稳定功能", subtitle: "实车结果决定功能边界", icon: "checkmark.shield.fill")
+            AppInfoRow(
+                title: "当前可用",
+                detail: "锁态、电量、速度、里程和固件信息读取",
+                icon: "checkmark.circle.fill",
+                color: AppTheme.success
+            )
+            AppInfoRow(
+                title: "不可用",
+                detail: "车辆设置和外部锁控制已停用，界面中没有隐藏入口",
+                icon: "nosign",
+                color: AppTheme.warning
+            )
         }
-        .padding(18)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+        .appCard(tint: AppTheme.warning)
     }
 
-    private func metric(title: String, value: String) -> some View {
-        VStack(spacing: 4) {
-            Text(value)
-                .font(.headline.monospacedDigit())
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+    private var latestCapturedAt: Date? {
+        [device.lockSnapshot.capturedAt, device.scooterSnapshot.capturedAt]
+            .compactMap { $0 }
+            .max()
+    }
+
+    private var lockStateIcon: String {
+        switch device.lockState {
+        case .unknown: return "questionmark.circle"
+        case .unlocked: return "lock.open.fill"
+        case .locked: return "lock.fill"
         }
-        .frame(maxWidth: .infinity, minHeight: 58)
-        .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var lockStateColor: Color {
+        switch device.lockState {
+        case .unknown: return .secondary
+        case .unlocked: return AppTheme.accent
+        case .locked: return AppTheme.success
+        }
     }
 
     private func percent(_ value: Int?) -> String {
@@ -99,7 +152,7 @@ struct VehicleToolsView: View {
     }
 
     private func speed(_ value: Double?) -> String {
-        value.map { String(format: "%.1f", $0) } ?? "未知"
+        value.map { String(format: "%.1f km/h", $0) } ?? "未知"
     }
 
     private func distance(_ meters: Int?) -> String {

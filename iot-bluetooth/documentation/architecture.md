@@ -2,7 +2,7 @@
 
 ## 产品边界
 
-Build 25 是单车、单用户、纯 BLE 的 iPhone 工具。App 不访问网络，不保存服务器凭据，不展示远程状态，也不调用 Face ID。生产功能只包含本车实测可靠的 BLE 认证、主锁、状态、车辆信息和旧骑行数据。
+Build 26 是单车、单用户、纯 BLE 的 iPhone 工具。App 不访问网络，不保存服务器凭据，不展示远程状态，也不调用 Face ID。生产功能只包含本车实测可靠的 BLE 认证、主锁、状态、车辆信息和旧骑行数据。
 
 ## 当前构建目标
 
@@ -10,6 +10,7 @@ Build 25 是单车、单用户、纯 BLE 的 iPhone 工具。App 不访问网络
 | --- | --- |
 | `IoTBluetoothApp.swift` | 创建唯一的 BLE 状态管理器 |
 | `ContentView.swift` | 三页导航、连接、主锁控制、结果与密钥界面 |
+| `AppDesignSystem.swift` | 深蓝与橙色主题、页面背景、统一卡片、连接横幅、状态标签和指标卡 |
 | `VehicleToolsView.swift` | `0x31`、`0x60` 车辆信息和实车验收边界 |
 | `BLEDataToolsView.swift` | `0x51`、`0x52` 旧数据、停用能力说明和诊断界面 |
 | `BLEDeviceManager.swift` | 手动扫描、认证、串行操作、回执、回读、超时和断开策略 |

@@ -2,12 +2,13 @@
 
 ## 自动化证据
 
-| 范围 | 命令 | Build 25 结果 |
+| 范围 | 命令 | Build 26 结果 |
 | --- | --- | --- |
 | 生产会话与协议模型 | Python 测试调用 `swiftc` 编译生产 `BLEControlSession`、协议和模型，再运行 Swift Harness | 通过，覆盖两种认证回调顺序、同连接连续动作、大端解析和协议参考载荷 |
-| iOS 源码守卫 | `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 13 项通过，确认 Build 25、常连接、回执、回读和危险命令无生产入口 |
+| iOS 源码守卫 | `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` | 14 项通过，确认 Build 26、常连接、回执、回读、界面边界和危险命令无生产入口 |
 | iOS 无签名编译 | `xcodebuild -project IoTBluetooth.xcodeproj -scheme IoTBluetooth -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build` | 通过，`BUILD SUCCEEDED` |
-| iOS 签名与安装 | 签名 `xcodebuild`、`codesign --verify`、`devicectl device install app`和设备端应用读回 | 通过，设备端读回 `1.0 (25)`，未启动 App |
+| iOS 模拟器界面 | iPhone 17 Pro、iOS 26.5 模拟器构建、启动、三页主界面和设备密钥页视觉与辅助功能树检查 | 通过，无截断和重复长按控件，禁用状态可朗读，未连接真实 BLE 设备 |
+| iOS 签名与安装 | 签名 `xcodebuild`、`codesign --verify`、`devicectl device install app` 和设备端应用读回 | 通过，设备端读回 `1.0 (26)`，未启动 App |
 
 源码守卫固定以下边界：
 
@@ -22,6 +23,7 @@
 - 活跃 App 不包含 LocalAuthentication、Face ID 权限或设备所有者验证调用。
 - 旧骑行用户 ID 不进入脱敏诊断。
 - 界面不显示“开锁成功”或“关锁成功”。
+- Build 26 的统一视觉组件已进入 Xcode Target，长按按钮包含进度、减少动态效果和辅助功能状态说明。
 
 ## 2026 年 8 月 23 日实车证据
 
