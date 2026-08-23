@@ -50,7 +50,7 @@ class SourceGuardTests(unittest.TestCase):
         for undocumented in ("0x85", "0x91", "0xFA", "0xFB", "0xFC", "0xFF"):
             self.assertNotIn(undocumented, PROTOCOL + MANAGER)
 
-    def test_all_documented_feature_families_are_routed(self):
+    def test_only_accepted_feature_families_have_outbound_entry_points(self):
         expected_routes = (
             "case OmniCommand.authenticate.rawValue",
             "case OmniCommand.commandError.rawValue",
@@ -59,9 +59,6 @@ class SourceGuardTests(unittest.TestCase):
             "case OmniCommand.oldRideData.rawValue",
             "case OmniCommand.clearRideData.rawValue",
             "case OmniCommand.rideInfo.rawValue",
-            "case OmniCommand.settings.rawValue",
-            "case OmniCommand.settings2.rawValue",
-            "case OmniCommand.externalEquipment.rawValue",
         )
         for route in expected_routes:
             self.assertIn(route, MANAGER)
@@ -69,11 +66,17 @@ class SourceGuardTests(unittest.TestCase):
             "func refreshDeviceState()",
             "func requestOldRideData()",
             "func clearOldRideData()",
+        ):
+            self.assertIn(entry_point, MANAGER)
+        for forbidden in (
             "func applyBasicSettings(",
             "func applyAdvancedSettings(",
             "func operateExternalDevice(",
+            "send(.settings",
+            "send(.settings2",
+            "send(.externalEquipment",
         ):
-            self.assertIn(entry_point, MANAGER)
+            self.assertNotIn(forbidden, MANAGER + ALL_UI)
 
     def test_connection_is_reused_but_never_automatically_reconnected(self):
         self.assertIn("BLEControlSession", MANAGER)
@@ -114,19 +117,20 @@ class SourceGuardTests(unittest.TestCase):
         self.assertIn("device.unlock()", CONTENT)
         self.assertIn("device.lock()", CONTENT)
 
-    def test_mutating_tools_require_confirmation(self):
-        self.assertIn("确认修改基础设置", VEHICLE)
-        self.assertIn("确认修改高级设置", VEHICLE)
+    def test_only_accepted_mutating_tool_requires_confirmation(self):
         self.assertIn("清除旧骑行数据？", TOOLS)
-        self.assertIn("确认外部锁操作", TOOLS)
-        self.assertIn("role: .destructive", VEHICLE + TOOLS)
+        self.assertIn("role: .destructive", TOOLS)
+        self.assertNotIn("确认修改基础设置", VEHICLE)
+        self.assertNotIn("确认修改高级设置", VEHICLE)
+        self.assertNotIn("确认外部锁操作", TOOLS)
 
     def test_ui_never_claims_physical_success(self):
         self.assertNotIn("开锁成功", ALL_UI + MANAGER)
         self.assertNotIn("关锁成功", ALL_UI + MANAGER)
         self.assertIn("设备回包与锁态回读一致", CONTENT)
         self.assertIn("物理结果优先", CONTENT)
-        self.assertIn("检查真实机械状态", TOOLS)
+        self.assertIn("仪表、动力和轮毂锁", CONTENT)
+        self.assertIn("外部锁功能已停用", TOOLS)
 
     def test_diagnostics_are_shareable_and_exclude_old_user_id(self):
         self.assertIn("var diagnosticReport: String", MANAGER)
@@ -137,16 +141,18 @@ class SourceGuardTests(unittest.TestCase):
         )[0]
         self.assertNotIn("userID", diagnostic)
 
-    def test_new_views_are_in_target_and_build_number_is_24(self):
+    def test_current_views_are_in_target_and_build_number_is_25(self):
         for name in ("VehicleToolsView.swift", "BLEDataToolsView.swift"):
             self.assertEqual(PROJECT.count(f"path = {name};"), 1)
             self.assertEqual(PROJECT.count(f"/* {name} in Sources */"), 2)
-        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 24;"), 2)
+        self.assertEqual(PROJECT.count("CURRENT_PROJECT_VERSION = 25;"), 2)
 
-    def test_external_devices_are_documented_three_only(self):
+    def test_external_devices_remain_protocol_reference_only(self):
         cases = set(re.findall(r"case (\w+) = \"[^\"]+锁\"", MODELS))
         self.assertTrue({"battery", "wheel", "cable"}.issubset(cases))
         self.assertNotIn("hub", MODELS.lower())
+        self.assertIn("外部锁功能已停用", TOOLS)
+        self.assertNotIn("operateExternalDevice", MANAGER + ALL_UI)
 
 
 if __name__ == "__main__":

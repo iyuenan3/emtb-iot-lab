@@ -4,13 +4,12 @@ import Foundation
 
 final class BLEDeviceManager: NSObject, ObservableObject {
     @Published private(set) var phase: ConnectionPhase = .idle
-    @Published private(set) var operationMessage = "手动连接后可使用完整蓝牙工具"
+    @Published private(set) var operationMessage = "手动连接后可使用已验收蓝牙功能"
     @Published private(set) var lastOutcome: ControlOutcome = .none
     @Published private(set) var lockState: VehicleLockState = .unknown
     @Published private(set) var lockSnapshot = LockSnapshot()
     @Published private(set) var scooterSnapshot = ScooterSnapshot()
     @Published private(set) var oldRideData: OldRideData?
-    @Published private(set) var externalStates: [ExternalDeviceKind: ExternalDeviceState] = [:]
     @Published private(set) var rssi: Int?
     @Published private(set) var deviceKeyStored = false
     @Published private(set) var isOperating = false
@@ -64,10 +63,6 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         ].joined(separator: "\n")
     }
 
-    func externalState(for kind: ExternalDeviceKind) -> ExternalDeviceState {
-        externalStates[kind] ?? .unknown
-    }
-
     private static let diagnosticTimestamp: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -85,20 +80,13 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         case control(VehicleControlAction)
         case readOldRideData
         case clearOldRideData
-        case basicSettings
-        case advancedSettings
-        case external(ExternalDeviceOperation)
-        case externalReadback(ExternalDeviceOperation)
 
         var isMutation: Bool {
             switch self {
             case .refresh, .readOldRideData:
                 return false
-            case .control, .clearOldRideData, .basicSettings, .advancedSettings,
-                 .externalReadback:
+            case .control, .clearOldRideData:
                 return true
-            case .external(let operation):
-                return operation.isMutation
             }
         }
 
@@ -108,10 +96,6 @@ final class BLEDeviceManager: NSObject, ObservableObject {
             case .control(let action): return action.rawValue
             case .readOldRideData: return "旧骑行数据读取"
             case .clearOldRideData: return "旧骑行数据清除"
-            case .basicSettings: return "基础设置"
-            case .advancedSettings: return "高级设置"
-            case .external(let operation), .externalReadback(let operation):
-                return operation.title
             }
         }
     }
@@ -223,42 +207,6 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         guard beginOperation(.clearOldRideData, message: "正在清除设备中的旧骑行数据") else { return }
         guard send(.clearRideData, payload: [0x01], label: "旧骑行数据清除") else {
             failOperation("旧骑行数据清除通道不可用")
-            return
-        }
-    }
-
-    func applyBasicSettings(_ settings: ScooterBasicSettings) {
-        guard !settings.isNoOp else {
-            operationMessage = ScooterSettingsError.noChanges.localizedDescription
-            return
-        }
-        guard beginOperation(.basicSettings, message: "正在发送滑板车基础设置") else { return }
-        guard send(.settings, payload: settings.payload, label: "基础设置") else {
-            failOperation("基础设置写入通道不可用")
-            return
-        }
-    }
-
-    func applyAdvancedSettings(_ settings: ScooterAdvancedSettings) {
-        do {
-            try settings.validate()
-        } catch {
-            operationMessage = error.localizedDescription
-            return
-        }
-        guard beginOperation(.advancedSettings, message: "正在发送滑板车高级设置") else { return }
-        guard send(.settings2, payload: settings.payload, label: "高级设置") else {
-            failOperation("高级设置写入通道不可用")
-            return
-        }
-    }
-
-    func operateExternalDevice(_ operation: ExternalDeviceOperation) {
-        guard beginOperation(.external(operation), message: "正在\(operation.title)", timeout: 12) else {
-            return
-        }
-        guard send(.externalEquipment, payload: [operation.code], label: operation.title) else {
-            failOperation("外部锁控制通道不可用")
             return
         }
     }
@@ -421,15 +369,12 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         case OmniCommand.oldRideData.rawValue:
             processOldRideData(frame.content)
         case OmniCommand.clearRideData.rawValue:
-            processSimpleResult(frame.content, operation: .clearOldRideData)
+            processClearOldRideDataResult(frame.content)
         case OmniCommand.rideInfo.rawValue:
             processScooterInfo(frame.content)
-        case OmniCommand.settings.rawValue:
-            processSimpleResult(frame.content, operation: .basicSettings)
-        case OmniCommand.settings2.rawValue:
-            processSimpleResult(frame.content, operation: .advancedSettings)
-        case OmniCommand.externalEquipment.rawValue:
-            processExternalResult(frame.content)
+        case OmniCommand.settings.rawValue, OmniCommand.settings2.rawValue,
+             OmniCommand.externalEquipment.rawValue:
+            appendEvent("协议", "忽略已停用功能的设备回包")
         default:
             appendEvent("协议", "忽略文档外 BLE 命令 0x\(String(format: "%02X", frame.command))")
         }
@@ -555,122 +500,20 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         completeOperation("旧骑行数据已读取，请保存后再决定是否清除")
     }
 
-    private func processSimpleResult(_ content: [UInt8], operation: PendingOperation) {
-        guard let current = pendingOperation,
-              current.title == operation.title,
+    private func processClearOldRideDataResult(_ content: [UInt8]) {
+        guard case .clearOldRideData = pendingOperation,
               let result = content.first else {
             appendEvent("协议", "忽略与当前操作无关的结果")
             return
         }
         let accepted = result == 0
-        switch operation {
-        case .clearOldRideData:
-            if accepted {
-                oldRideData = nil
-                lockSnapshot.hasOldRideData = false
-                appendEvent("数据", "设备确认旧骑行数据已清除")
-                completeOperation("设备返回旧数据清除成功，蓝牙保持连接")
-            } else {
-                completeOperation("设备返回旧数据清除失败")
-            }
-        case .basicSettings:
-            appendEvent("设置", accepted ? "设备返回基础设置成功" : "设备返回基础设置失败")
-            completeOperation(accepted ? "设备返回基础设置成功，蓝牙保持连接" : "设备返回基础设置失败")
-        case .advancedSettings:
-            appendEvent("设置", accepted ? "设备返回高级设置成功" : "设备返回高级设置失败")
-            completeOperation(accepted ? "设备返回高级设置成功，蓝牙保持连接" : "设备返回高级设置失败")
-        default:
-            break
-        }
-    }
-
-    private func processExternalResult(_ content: [UInt8]) {
-        guard content.count >= 2 else {
-            failOperation("外部锁回包长度不足")
-            return
-        }
-        let returnedCode = content[0]
-        let result = content[1]
-
-        switch pendingOperation {
-        case .external(let operation):
-            guard returnedCode == operation.code else {
-                appendEvent("协议", "忽略其他外部锁操作结果")
-                return
-            }
-            if !operation.isMutation {
-                finishExternalQuery(operation: operation, result: result)
-                return
-            }
-            if result == 0x10 || result == 0x11 {
-                finishExternalMutation(operation: operation, stateResult: result)
-            } else if result == 0x00 {
-                operationMessage = "设备已接收\(operation.title)，正在回读状态"
-                let generation = operationGeneration
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                    guard let self,
-                          self.isOperating,
-                          self.operationGeneration == generation else {
-                        return
-                    }
-                    self.pendingOperation = .externalReadback(operation)
-                    let query = ExternalDeviceOperation.query(operation.kind)
-                    guard self.send(
-                        .externalEquipment,
-                        payload: [query.code],
-                        label: query.title
-                    ) else {
-                        self.failOperation("外部锁状态回读通道不可用")
-                        return
-                    }
-                }
-            } else if result == 0x01 {
-                appendEvent("外设", "设备返回\(operation.title)失败")
-                completeOperation("设备返回\(operation.title)失败")
-            } else {
-                failOperation("设备返回\(operation.title)通信超时")
-            }
-
-        case .externalReadback(let original):
-            let query = ExternalDeviceOperation.query(original.kind)
-            guard returnedCode == query.code else {
-                appendEvent("协议", "忽略其他外部锁状态结果")
-                return
-            }
-            finishExternalMutation(operation: original, stateResult: result)
-
-        default:
-            appendEvent("协议", "忽略无上下文的外部锁结果")
-        }
-    }
-
-    private func finishExternalQuery(operation: ExternalDeviceOperation, result: UInt8) {
-        guard let state = OmniProtocol.externalState(from: result) else {
-            completeOperation("设备未返回可识别的\(operation.kind.rawValue)状态")
-            return
-        }
-        externalStates[operation.kind] = state
-        appendEvent("外设", "\(operation.kind.rawValue)状态回读：\(state.rawValue)")
-        completeOperation("\(operation.kind.rawValue)状态：\(state.rawValue)")
-    }
-
-    private func finishExternalMutation(operation: ExternalDeviceOperation, stateResult: UInt8) {
-        guard let state = OmniProtocol.externalState(from: stateResult) else {
-            failOperation("\(operation.title)后未获得可识别状态")
-            return
-        }
-        externalStates[operation.kind] = state
-        let matches: Bool
-        switch operation {
-        case .unlock: matches = state == .unlocked
-        case .lock: matches = state == .locked
-        case .query: matches = true
-        }
-        if matches {
-            appendEvent("外设", "\(operation.title)回包与状态回读一致")
-            completeOperation("\(operation.title)回包与状态回读一致，蓝牙保持连接")
+        if accepted {
+            oldRideData = nil
+            lockSnapshot.hasOldRideData = false
+            appendEvent("数据", "设备确认旧骑行数据已清除")
+            completeOperation("设备返回旧数据清除成功，蓝牙保持连接")
         } else {
-            failOperation("\(operation.title)回包与状态回读不一致")
+            completeOperation("设备返回旧数据清除失败")
         }
     }
 
@@ -814,7 +657,6 @@ final class BLEDeviceManager: NSObject, ObservableObject {
         lockSnapshot = LockSnapshot()
         scooterSnapshot = ScooterSnapshot()
         oldRideData = nil
-        externalStates.removeAll()
         rssi = nil
     }
 

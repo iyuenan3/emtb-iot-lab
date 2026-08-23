@@ -3,7 +3,6 @@ import SwiftUI
 struct BLEDataToolsView: View {
     @EnvironmentObject private var device: BLEDeviceManager
     @State private var confirmClearOldData = false
-    @State private var pendingExternalOperation: ExternalDeviceOperation?
 
     var body: some View {
         NavigationStack {
@@ -11,13 +10,13 @@ struct BLEDataToolsView: View {
                 VStack(spacing: 18) {
                     connectionNotice
                     oldRideDataCard
-                    externalLocksCard
+                    disabledExternalDevicesCard
                     diagnosticsCard
                 }
                 .padding()
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("蓝牙工具")
+            .navigationTitle("数据与诊断")
             .alert("清除旧骑行数据？", isPresented: $confirmClearOldData) {
                 Button("取消", role: .cancel) {}
                 Button("确认清除", role: .destructive) {
@@ -25,19 +24,6 @@ struct BLEDataToolsView: View {
                 }
             } message: {
                 Text("请先分享或记录已读取的数据。设备确认清除后，App 无法替你恢复。")
-            }
-            .alert("确认外部锁操作", isPresented: externalConfirmationPresented) {
-                Button("取消", role: .cancel) {
-                    pendingExternalOperation = nil
-                }
-                Button("确认发送", role: .destructive) {
-                    if let pendingExternalOperation {
-                        device.operateExternalDevice(pendingExternalOperation)
-                    }
-                    pendingExternalOperation = nil
-                }
-            } message: {
-                Text(externalConfirmationMessage)
             }
         }
     }
@@ -107,42 +93,11 @@ struct BLEDataToolsView: View {
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
     }
 
-    private var externalLocksCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Label("外部锁设备 0x81", systemImage: "lock.square.stack.fill")
+    private var disabledExternalDevicesCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("外部锁功能已停用", systemImage: "lock.slash.fill")
                 .font(.headline)
-
-            ForEach(ExternalDeviceKind.allCases) { kind in
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text(kind.rawValue).font(.subheadline.bold())
-                        Spacer()
-                        Text(device.externalState(for: kind).rawValue)
-                            .font(.caption.bold())
-                            .foregroundStyle(externalStateColor(device.externalState(for: kind)))
-                    }
-                    HStack {
-                        Button("查询") {
-                            device.operateExternalDevice(.query(kind))
-                        }
-                        .buttonStyle(.bordered)
-                        Button("解锁", role: .destructive) {
-                            pendingExternalOperation = .unlock(kind)
-                        }
-                        .buttonStyle(.bordered)
-                        Button("上锁") {
-                            pendingExternalOperation = .lock(kind)
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                    .disabled(!device.canRunProtocolCommand)
-                }
-                if kind != ExternalDeviceKind.allCases.last {
-                    Divider()
-                }
-            }
-
-            Text("协议文档定义了电池锁、车轮锁和钢缆锁。控制后 App 会查询状态；结果不一致或超时会断开蓝牙，不会自动重试。")
+            Text("本车对电池锁、车轮锁和钢缆锁的 0x81 查询均无回包。App 不再提供查询、解锁或上锁入口，轮毂锁只随已验证的主锁流程联动。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -190,20 +145,6 @@ struct BLEDataToolsView: View {
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
     }
 
-    private var externalConfirmationPresented: Binding<Bool> {
-        Binding(
-            get: { pendingExternalOperation != nil },
-            set: { presented in
-                if !presented { pendingExternalOperation = nil }
-            }
-        )
-    }
-
-    private var externalConfirmationMessage: String {
-        guard let operation = pendingExternalOperation else { return "" }
-        return "将发送“\(operation.title)”指令。请确认车辆静止，并在操作后检查真实机械状态。"
-    }
-
     private func dataRow(_ title: String, _ value: String) -> some View {
         HStack {
             Text(title).foregroundStyle(.secondary)
@@ -217,13 +158,5 @@ struct BLEDataToolsView: View {
         let minutes = (seconds % 3_600) / 60
         let remainingSeconds = seconds % 60
         return "\(hours)时 \(minutes)分 \(remainingSeconds)秒"
-    }
-
-    private func externalStateColor(_ state: ExternalDeviceState) -> Color {
-        switch state {
-        case .unknown: return .secondary
-        case .locked: return .green
-        case .unlocked: return .orange
-        }
     }
 }
