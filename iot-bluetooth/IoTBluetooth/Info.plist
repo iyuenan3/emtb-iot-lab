@@ -2,10 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>IoTDeviceBikeNumber</key>
-    <string>$(DEVICE_BIKE_NUMBER)</string>
-    <key>IoTDeviceIMEI</key>
-    <string>$(DEVICE_IMEI)</string>
     <key>IoTDeviceBLEMAC</key>
     <string>$(DEVICE_BLE_MAC)</string>
     <key>CFBundleDevelopmentRegion</key>

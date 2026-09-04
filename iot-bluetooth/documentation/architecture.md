@@ -2,57 +2,45 @@
 
 ## 产品边界
 
-Build 26 是单车、单用户、纯 BLE 的 iPhone 工具。App 不访问网络，不保存服务器凭据，不展示远程状态，也不调用 Face ID。生产功能只包含本车实测可靠的 BLE 认证、主锁、状态、车辆信息和旧骑行数据。
+Build 33 是单车、单用户、纯 BLE 的 iPhone 车钥匙。App 不访问网络，不调用 Face ID。用户可见的车辆功能只有开锁和关锁。
 
 ## 当前构建目标
 
-| 代码 | 职责 |
+| 文件 | 职责 |
 | --- | --- |
-| `IoTBluetoothApp.swift` | 创建唯一的 BLE 状态管理器 |
-| `ContentView.swift` | 三页导航、连接、主锁控制、结果与密钥界面 |
-| `AppDesignSystem.swift` | 深蓝与橙色主题、页面背景、统一卡片、连接横幅、状态标签和指标卡 |
-| `VehicleToolsView.swift` | `0x31`、`0x60` 车辆信息和实车验收边界 |
-| `BLEDataToolsView.swift` | `0x51`、`0x52` 旧数据、停用能力说明和诊断界面 |
-| `BLEDeviceManager.swift` | 手动扫描、认证、串行操作、回执、回读、超时和断开策略 |
-| `OmniProtocol.swift` | 11 条命令白名单、CRC8、帧编码、解码和大端整数工具 |
-| `Models.swift` | 连接、锁态、车辆信息、设置、旧数据、外部锁和控制会话模型 |
-| `KeychainStore.swift` | 设备密钥的本机 Keychain 存储与旧值迁移 |
+| `BikeKeyApp.swift` | 创建唯一控制器并装配单页界面 |
+| `BikeKeyView.swift` | 两个长按按钮、操作状态、物理检查和密钥录入 |
+| `BluetoothKeyController.swift` | CoreBluetooth 扫描、连接、超时、断开和状态发布 |
+| `SecureKeyStore.swift` | 全新的本机 Keychain 存储 |
+| `Shared/BikeWireProtocol.swift` | 帧编码、解码、CRC8 和大端整数 |
+| `Shared/BikeControlEngine.swift` | 开锁与关锁共用的纯状态机 |
 
-`RemoteControlManager.swift`、`RemoteControlView.swift` 和 `PendingBLEEventStore.swift` 仍保留在工作树中用于历史审计，但不在 Xcode Target 中，不会编译进 App。
+以上六个文件是 Xcode Target 的全部 Swift 源码。旧 App 文件已删除，不再作为隐藏备用实现保留。
 
-## 数据流
+## 分层
 
 ```text
-用户手动连接
-    ↓
-目标 BLE 广播与 NUS 服务
-    ↓
-设备密钥认证并取得连接 Key
-    ↓
-自动读取 0x31 主锁和 0x60 车辆状态
-    ↓
-用户执行一项查询或写操作
-    ↓
-设备结果与必要回读
-    ↓
-完成当前操作，保持认证连接
-    ↓
-用户继续操作或手动断开
+长按开锁或关锁
+        ↓
+BikeKeyView
+        ↓
+BluetoothKeyController
+        ↓
+BikeControlEngine
+        ↓
+BikeWireProtocol
+        ↓
+CoreBluetooth NUS
 ```
 
-## 串行操作器
-
-`BLEDeviceManager` 同一时刻只允许一个 `PendingOperation`。状态读取、主锁控制和旧数据共用同一超时与错误归因通道，避免无命令序号协议中的回包串线。
-
-主锁控制额外使用 `BLEControlSession` 记录当前动作和设备结果。写入完成回调只记录底层写入成功或失败，不负责推进协议。设备通知、必要回执和状态回读决定操作是否完成。
+状态机不知道 iOS 界面或 CoreBluetooth，Controller 只负责把通知、写回调和定时器事件送入状态机。MacBook 工具使用同一状态机和协议模块，因此步骤、载荷和等待时间不会分别维护。
 
 ## 不变量
 
-- 一个物理 BLE 连接只认证一次，连接 Key 不跨连接复用。
-- 一个时刻最多一个协议操作，完成后才开放下一项。
-- 当前状态与主锁目标一致时不发送重复开关锁。
-- 主锁结果后立即发送必要回执，再读取 `0x31` 和 `0x60`。
-- `0x61`、`0x62` 和 `0x81` 没有生产发送入口，收到无上下文回包时只记录并忽略。
-- 明确失败可以结束当前操作并保持连接；超时、连接中断、写入失败或状态不一致会断开。
-- App 从不自动连接、自动重连、自动重试或切换其他控制通道。
-- 协议结果不能替代物理状态确认。仪表亮表示有动力，仪表灭表示无动力。
+- 每次长按只固定一个动作并建立一个连接。
+- 一个连接只认证一次，连接 Key 不跨连接保存。
+- 所有请求串行，前一步写回调和业务响应齐备后才推进。
+- 控制帧只发送一次，不自动重试或补发反向动作。
+- 必要回执写入后等待 800 毫秒再主动断开。
+- 提前断开且控制尚未发送时显示“未发送”，已发送时显示“结果未知”。
+- 协议接受不等于车辆物理成功。

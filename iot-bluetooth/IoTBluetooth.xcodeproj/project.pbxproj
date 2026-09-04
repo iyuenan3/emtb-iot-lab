@@ -7,33 +7,27 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A10000000000000000000001 /* IoTBluetoothApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* IoTBluetoothApp.swift */; };
-		A10000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* ContentView.swift */; };
-		A10000000000000000000003 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* Models.swift */; };
-		A10000000000000000000004 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* KeychainStore.swift */; };
-		A10000000000000000000005 /* OmniProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* OmniProtocol.swift */; };
-		A10000000000000000000006 /* BLEDeviceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000006 /* BLEDeviceManager.swift */; };
+		A10000000000000000000001 /* BikeKeyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* BikeKeyApp.swift */; };
+		A10000000000000000000002 /* BikeKeyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* BikeKeyView.swift */; };
+		A10000000000000000000003 /* BikeControlEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* BikeControlEngine.swift */; };
+		A10000000000000000000004 /* SecureKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* SecureKeyStore.swift */; };
+		A10000000000000000000005 /* BikeWireProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* BikeWireProtocol.swift */; };
+		A10000000000000000000006 /* BluetoothKeyController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000006 /* BluetoothKeyController.swift */; };
 		A10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* Assets.xcassets */; };
-		A10000000000000000000008 /* VehicleToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* VehicleToolsView.swift */; };
-		A10000000000000000000009 /* BLEDataToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000E /* BLEDataToolsView.swift */; };
-		A1000000000000000000000A /* AppDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000F /* AppDesignSystem.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		B10000000000000000000000 /* IoTBluetooth.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = IoTBluetooth.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B10000000000000000000001 /* IoTBluetoothApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IoTBluetoothApp.swift; sourceTree = "<group>"; };
-		B10000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		B10000000000000000000003 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		B10000000000000000000004 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
-		B10000000000000000000005 /* OmniProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OmniProtocol.swift; sourceTree = "<group>"; };
-		B10000000000000000000006 /* BLEDeviceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEDeviceManager.swift; sourceTree = "<group>"; };
+		B10000000000000000000001 /* BikeKeyApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeKeyApp.swift; sourceTree = "<group>"; };
+		B10000000000000000000002 /* BikeKeyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeKeyView.swift; sourceTree = "<group>"; };
+		B10000000000000000000003 /* BikeControlEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeControlEngine.swift; sourceTree = "<group>"; };
+		B10000000000000000000004 /* SecureKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureKeyStore.swift; sourceTree = "<group>"; };
+		B10000000000000000000005 /* BikeWireProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeWireProtocol.swift; sourceTree = "<group>"; };
+		B10000000000000000000006 /* BluetoothKeyController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothKeyController.swift; sourceTree = "<group>"; };
 		B10000000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10000000000000000000008 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B1000000000000000000000B /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
 		B1000000000000000000000C /* Secrets.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig.example; sourceTree = "<group>"; };
-		B1000000000000000000000D /* VehicleToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VehicleToolsView.swift; sourceTree = "<group>"; };
-		B1000000000000000000000E /* BLEDataToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEDataToolsView.swift; sourceTree = "<group>"; };
-		B1000000000000000000000F /* AppDesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDesignSystem.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +46,7 @@
 			children = (
 				B1000000000000000000000B /* Config.xcconfig */,
 				B1000000000000000000000C /* Secrets.xcconfig.example */,
+				D10000000000000000000003 /* Shared */,
 				D10000000000000000000001 /* IoTBluetooth */,
 				D10000000000000000000002 /* Products */,
 			);
@@ -60,19 +55,23 @@
 		D10000000000000000000001 /* IoTBluetooth */ = {
 			isa = PBXGroup;
 			children = (
-				B10000000000000000000001 /* IoTBluetoothApp.swift */,
-				B10000000000000000000002 /* ContentView.swift */,
-				B10000000000000000000003 /* Models.swift */,
-				B10000000000000000000004 /* KeychainStore.swift */,
-				B10000000000000000000005 /* OmniProtocol.swift */,
-				B10000000000000000000006 /* BLEDeviceManager.swift */,
-				B1000000000000000000000F /* AppDesignSystem.swift */,
-				B1000000000000000000000D /* VehicleToolsView.swift */,
-				B1000000000000000000000E /* BLEDataToolsView.swift */,
+				B10000000000000000000001 /* BikeKeyApp.swift */,
+				B10000000000000000000002 /* BikeKeyView.swift */,
+				B10000000000000000000004 /* SecureKeyStore.swift */,
+				B10000000000000000000006 /* BluetoothKeyController.swift */,
 				B10000000000000000000007 /* Info.plist */,
 				B10000000000000000000008 /* Assets.xcassets */,
 			);
 			path = IoTBluetooth;
+			sourceTree = "<group>";
+		};
+		D10000000000000000000003 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				B10000000000000000000003 /* BikeControlEngine.swift */,
+				B10000000000000000000005 /* BikeWireProtocol.swift */,
+			);
+			path = Shared;
 			sourceTree = "<group>";
 		};
 		D10000000000000000000002 /* Products */ = {
@@ -152,15 +151,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000000000000000000001 /* IoTBluetoothApp.swift in Sources */,
-				A10000000000000000000002 /* ContentView.swift in Sources */,
-				A10000000000000000000003 /* Models.swift in Sources */,
-				A10000000000000000000004 /* KeychainStore.swift in Sources */,
-				A10000000000000000000005 /* OmniProtocol.swift in Sources */,
-				A10000000000000000000006 /* BLEDeviceManager.swift in Sources */,
-				A1000000000000000000000A /* AppDesignSystem.swift in Sources */,
-				A10000000000000000000008 /* VehicleToolsView.swift in Sources */,
-				A10000000000000000000009 /* BLEDataToolsView.swift in Sources */,
+				A10000000000000000000001 /* BikeKeyApp.swift in Sources */,
+				A10000000000000000000002 /* BikeKeyView.swift in Sources */,
+				A10000000000000000000003 /* BikeControlEngine.swift in Sources */,
+				A10000000000000000000004 /* SecureKeyStore.swift in Sources */,
+				A10000000000000000000005 /* BikeWireProtocol.swift in Sources */,
+				A10000000000000000000006 /* BluetoothKeyController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -209,7 +205,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 26;
+				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_ASSET_PATHS = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = IoTBluetooth/Info.plist;
@@ -230,7 +226,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 26;
+				CURRENT_PROJECT_VERSION = 33;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = IoTBluetooth/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
